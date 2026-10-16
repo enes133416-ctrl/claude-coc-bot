@@ -1,0 +1,597 @@
+package com.cocbot
+
+import android.graphics.Bitmap
+import android.graphics.PointF
+import android.os.SystemClock
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+
+/**
+ * Durum makinesi. Her karede önce sahne tanınır; tanınmazsa hiçbir yere dokunulmaz.
+ *
+ * Köy → Savaş menüsü → Ordu → rakip önizleme → savaş → sonuç → köy
+ *
+ * Keşifte ganimet 3M'nin altındaysa "İleri" ile yeni köy aranır, üstündeyse saldırı planı işler:
+ *   1) x40 asker kartı: 10'ar asker, 10 sn arayla 4 grup (40 asker) ve hepsi birbirinden uzak noktalara
+ *   2) kahramanlar sağ üst bölgeye, büyüler üssün ortasına (kral bölgesi)
+ *   3) kahramanlar bırakıldıktan 10 sn sonra kartlara tekrar dokunarak yetenekler
+ *   4) elde kalan tüm kartlar (asker ve büyü) geçerli noktalara boşaltılır
+ *   5) savaş başlangıcından 70 sn sonra "Teslim Ol" → onayda "Tamam" → sonuçta "Eve Dön"
+ */
+class BotLoop(private val svc: BotService) {
+
+    companion object {
+        const val WAIT_MS = 2000L            // dokunuş sonrası ekran değişimi bekleme üst sınırı
+        const val MAX_ATTEMPTS = 3           // aynı sahnede art arda en fazla deneme
+        const val RETREAT_ATTEMPTS = 8       // teslim ol / Tamam / Eve Dön için deneme sayısı
+        const val LOOT_LIMIT = 3_000_000L    // altın + iksir bunu geçerse saldır
+        const val TAP_GAP_MS = 300L          // bırakma dokunuşları arası bekleme
+        const val UNKNOWN_WARN_MS = 30_000L
+        const val BATTLE_WARN_MS = 240_000L
+
+        // Saldırı planı
+        const val TOKEN_GROUPS = 4           // x40 kartı → 4 grup
+        const val TOKEN_PER_GROUP = 10       // her grupta 10 asker
+        const val GROUP_DELAY_MS = 10_000L   // gruplar arası 10 sn
+        const val HERO_ABILITY_DELAY_MS = 10_000L
+        const val BATTLE_LIMIT_MS = 70_000L  // 70 sn sonra teslim ol
+        const val BATTLE_HARD_LIMIT_MS = 95_000L
+        const val FLUSH_TAPS = 4             // kart başına boşaltma dokunuşu
+        const val FLUSH_ROUNDS = 2           // sayaç hâlâ görünüyorsa tekrar sayısı
+
+        // Kart yuvaları (0 tabanlı) — referans 2419x1512
+        val CARD_X = intArrayOf(326, 528, 704, 874, 1043, 1232, 1401, 1571, 1740, 1900)
+        const val CARD_TAP_Y = 1332
+        val CARD_LBL_X = arrayOf(
+            intArrayOf(258, 398), intArrayOf(460, 600), intArrayOf(636, 776),
+            intArrayOf(807, 946), intArrayOf(976, 1114), intArrayOf(1165, 1304),
+            intArrayOf(1334, 1473), intArrayOf(1504, 1643), intArrayOf(1673, 1812),
+            intArrayOf(1838, 1990)
+        )
+        const val CARD_LBL_Y0 = 1288
+        const val CARD_LBL_Y1 = 1330
+
+        const val SLOT_TOKENS = 0                     // x40 asker kartı
+        const val SLOT_TROOP2 = 1                     // ikinci asker kartı (x5)
+        val SLOT_HEROES = intArrayOf(2, 3, 4)         // kahraman kartları
+        val SLOT_SPELLS = intArrayOf(5, 6, 7, 8)      // büyü kartları
+
+        const val SURRENDER_X = 152; const val SURRENDER_Y = 1193   // kırmızı Teslim Ol / Savaşı Bitir
+        const val TAMAM_X = 1451; const val TAMAM_Y = 941           // onay ekranı yeşil Tamam
+        const val EVE_DON_X = 1211; const val EVE_DON_Y = 1308      // sonuç ekranı Eve Dön
+    }
+
+    private enum class Stage { SCOUT, ATTACK, RETREAT }
+    private enum class Phase { TOKENS, HEROES, SPELLS, ABILITY, FLUSH, WAIT }
+
+    private val pt = PointF()
+
+    private var lastTapScene: Scene? = null
+    private var lastTapAt = 0L
+    private var attempts = 0
+    private var unknownSince = 0L
+
+    // Keşif durumu
+    private var pending: Pair<Long, Long>? = null
+    private var prevVillage: Pair<Long, Long>? = null
+    private var ileriAt = 0L
+    private var ileriTries = 0
+
+    // Savaş planı durumu
+    private var stage = Stage.SCOUT
+    private var phase = Phase.TOKENS
+    private var attackStart = 0L
+    private var heroDeployAt = 0L
+    private var groupCount = 0
+    private var tokenPlaced = 0
+    private var heroIndex = 0
+    private var spellIndex = 0
+    private var abilityIndex = 0
+    private var flushIndex = 0
+    private var flushRound = 0
+    private var spellSeed = 0
+    private var battleScanned = false
+    private var scanTries = 0
+    private var retreatAt = 0L
+    private val spellCasts = IntArray(4)
+    private val flushSlots = ArrayList<Int>()
+    private val flushIsSpell = ArrayList<Boolean>()
+
+    private var mapBmp: Bitmap? = null
+    private var deployer: Deployer? = null
+
+    suspend fun run() {
+        while (svc.running) {
+            try {
+                step()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                svc.log("Hata: ${e.javaClass.simpleName}")
+                delay(100)
+            }
+        }
+    }
+
+    private suspend fun step() {
+        val frame = svc.grab()
+        if (frame == null) {          // OS ekran görüntüsü hız sınırı vb.: kısa bekle, tekrar al
+            delay(40)
+            return
+        }
+        try {
+            val scene = Scenes.detect(frame.small)
+            handle(frame, scene)
+        } finally {
+            frame.recycle()
+        }
+    }
+
+    private suspend fun handle(frame: Frame, scene: Scene?) {
+        val now = SystemClock.elapsedRealtime()
+
+        // Saldırı planı çok uzadıysa (sahne tanınamasa bile) yine de teslim olunur
+        if (stage == Stage.ATTACK && attackStart > 0 && now - attackStart >= BATTLE_HARD_LIMIT_MS &&
+            (scene == null || scene == Scene.ATTACK_PREP || scene == Scene.ATTACK_BATTLE || scene == Scene.SURRENDER_CONFIRM)
+        ) {
+            svc.log("⚠ Süre aşıldı, teslim olunuyor")
+            startRetreat(frame, now)
+            return
+        }
+
+        if (scene == null) {
+            if (unknownSince == 0L) unknownSince = now
+            val limit = if (stage == Stage.ATTACK) BATTLE_WARN_MS else UNKNOWN_WARN_MS
+            when {
+                now - unknownSince > limit -> svc.log("⚠ Bilinmeyen ekran (dokunulmuyor)")
+                stage == Stage.ATTACK -> svc.log("Savaş sürüyor…")
+                else -> svc.log("Ekran bekleniyor…")
+            }
+            return
+        }
+        unknownSince = 0L
+
+        when (scene) {
+            Scene.HOME -> {
+                if (stage != Stage.SCOUT) finishAttack()
+                act(frame, scene, now, "Savaş") { tapRef(frame, 147f, 1375f) }
+            }
+            Scene.WAR_MENU -> act(frame, scene, now, "Eşleşme Bul") { tapRef(frame, 383f, 1060f) }
+            Scene.ARMY -> act(frame, scene, now, "Saldır!") { tapRef(frame, 2050f, 1238f) }
+            Scene.RESULT -> {
+                if (stage != Stage.SCOUT) finishAttack()
+                act(frame, scene, now, "Eve Dön", RETREAT_ATTEMPTS) { tapRef(frame, EVE_DON_X.toFloat(), EVE_DON_Y.toFloat()) }
+            }
+            Scene.ATTACK_PREP -> when (stage) {
+                Stage.RETREAT -> retreat(frame, scene, now)
+                Stage.ATTACK -> battle(frame, scene, now)
+                else -> scout(frame, now)
+            }
+            Scene.ATTACK_BATTLE -> when (stage) {
+                Stage.RETREAT -> retreat(frame, scene, now)
+                Stage.ATTACK -> battle(frame, scene, now)
+                else -> {
+                    svc.log("Savaş ortasında başlatıldı, plan devreye giriyor")
+                    beginAttack(SystemClock.elapsedRealtime())
+                    battle(frame, scene, now)
+                }
+            }
+            Scene.SURRENDER_CONFIRM -> when (stage) {
+                Stage.RETREAT -> retreat(frame, scene, now)
+                Stage.ATTACK -> act(frame, scene, now, "Tamam (savaşı başlat)", RETREAT_ATTEMPTS) {
+                    tapRef(frame, TAMAM_X.toFloat(), TAMAM_Y.toFloat())
+                }
+                else -> svc.log("Onay ekranı (bot beklemiyor, dokunulmuyor)")
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- keşif
+
+    private suspend fun scout(frame: Frame, now: Long) {
+        // Ganimet: sarı altın (y≈178) ve pembe iksir (y≈245); kara iksir okunmaz
+        val gold = Ocr.readNumber(frame.full, 110, 150, 340, 205)
+        val elixir = Ocr.readNumber(frame.full, 110, 222, 340, 275)
+        if (gold == null || elixir == null) {
+            pending = null
+            svc.log("Ganimet okunuyor…")
+            return
+        }
+        val cur = gold to elixir
+
+        // İleri'den sonra eski köy hâlâ görünüyorsa yeni köyü bekle
+        if (cur == prevVillage && now - ileriAt < WAIT_MS) {
+            pending = null
+            svc.log("Yeni köy bekleniyor…")
+            return
+        }
+        // Yanlış okumaya karşı: iki ardışık karede aynı değer
+        if (cur != pending) {
+            pending = cur
+            svc.log("Ganimet okunuyor…")
+            return
+        }
+        if (prevVillage != null && cur != prevVillage) ileriTries = 0
+
+        val total = gold + elixir
+        if (total <= LOOT_LIMIT) {
+            if (ileriTries >= MAX_ATTEMPTS) {
+                svc.stopWithWarning("⚠ İleri çalışmadı, durdu")
+                return
+            }
+            ileriTries++
+            prevVillage = cur
+            ileriAt = now
+            pending = null
+            svc.log("Toplam $total ≤ 3M → İleri")
+            tapRef(frame, 2220f, 1148f)
+        } else {
+            svc.log("Toplam $total > 3M → saldırı başlıyor")
+            beginAttack(now)
+            tokenPhase(frame, 0L)
+        }
+    }
+
+    // ------------------------------------------------------------- saldırı
+
+    private fun beginAttack(now: Long) {
+        stage = Stage.ATTACK
+        phase = Phase.TOKENS
+        attackStart = if (now > 0) now else SystemClock.elapsedRealtime()
+        heroDeployAt = 0L
+        groupCount = 0
+        tokenPlaced = 0
+        heroIndex = 0
+        spellIndex = 0
+        abilityIndex = 0
+        flushIndex = 0
+        flushRound = 0
+        spellSeed = 0
+        battleScanned = false
+        scanTries = 0
+        retreatAt = 0L
+        for (i in spellCasts.indices) spellCasts[i] = 0
+        releaseMap()
+    }
+
+    private fun finishAttack() {
+        releaseMap()
+        stage = Stage.SCOUT
+        phase = Phase.TOKENS
+        attackStart = 0L
+        battleScanned = false
+        scanTries = 0
+    }
+
+    private fun releaseMap() {
+        deployer = null
+        mapBmp?.recycle()
+        mapBmp = null
+    }
+
+    /** Savaş alanı kopyasını hazırlar (keşifte çizgisiz, savaşta kırmızı çizgi ile). */
+    private suspend fun prepareMap(frame: Frame, battleScene: Boolean): Boolean {
+        val old = deployer
+        val map = try {
+            frame.small.copy(Bitmap.Config.ARGB_8888, false)
+        } catch (e: Throwable) {
+            null
+        } ?: return false
+        val nd = Deployer(Vision(map))
+        nd.scan(requireRedLine = battleScene)
+        if (!nd.ready && battleScene && scanTries >= 2) {
+            // çizgi bulunamadıysa üs merkezine uzaklık kuralına düş
+            nd.scan(requireRedLine = false)
+        }
+        if (!nd.ready) {
+            map.recycle()
+            scanTries++
+            svc.log("Bırakma alanı aranıyor…")
+            return false
+        }
+        if (old != null) nd.usePoints(old.usedPoints())
+        releaseMap()
+        mapBmp = map
+        deployer = nd
+        svc.log("Alan hazır (${nd.points} nokta)")
+        return true
+    }
+
+    private suspend fun battle(frame: Frame, scene: Scene, now: Long) {
+        if (stage != Stage.ATTACK) return
+        val battleScene = scene == Scene.ATTACK_BATTLE
+
+        val d = deployer
+        if (d == null) {
+            if (!prepareMap(frame, battleScene)) return
+            battleScanned = battleScene
+        } else if (battleScene && !battleScanned) {
+            if (!prepareMap(frame, true)) return
+            battleScanned = true
+        }
+
+        val elapsed = now - attackStart
+        if (elapsed >= BATTLE_HARD_LIMIT_MS) {
+            startRetreat(frame, now)
+            return
+        }
+
+        when (phase) {
+            Phase.TOKENS -> tokenPhase(frame, elapsed)
+            Phase.HEROES -> heroPhase(frame)
+            Phase.SPELLS -> spellPhase(frame)
+            Phase.ABILITY -> abilityPhase(frame, now)
+            Phase.FLUSH -> flushPhase(frame)
+            Phase.WAIT -> if (elapsed >= BATTLE_LIMIT_MS) {
+                startRetreat(frame, now)
+            } else {
+                svc.log("Teslim olmaya ${(BATTLE_LIMIT_MS - elapsed) / 1000} sn")
+                delay(150)
+            }
+        }
+    }
+
+    /** 1) x40 kartından 10'ar asker, 10 sn arayla 4 grup; hepsi ayrı noktalara. */
+    private suspend fun tokenPhase(frame: Frame, elapsed0: Long) {
+        val d = deployer ?: return
+        var elapsed = elapsed0
+        while (groupCount < TOKEN_GROUPS && elapsed >= groupCount * GROUP_DELAY_MS) {
+            tapCard(frame, SLOT_TOKENS)
+            delay(150)
+            var placed = 0
+            for (i in 0 until TOKEN_PER_GROUP) {
+                if (!svc.running) return
+                var firstDone = tokenPlaced > 0
+                val ok = place(frame, { again ->
+                    if (!firstDone && !again) { firstDone = true; d.first() }
+                    else d.anyFree()
+                })
+                if (!ok) break
+                placed++
+                tokenPlaced++
+                delay(TAP_GAP_MS)
+            }
+            groupCount++
+            svc.log("Asker grubu $groupCount/$TOKEN_GROUPS: $placed (toplam $tokenPlaced)")
+            elapsed = SystemClock.elapsedRealtime() - attackStart
+        }
+        if (groupCount >= TOKEN_GROUPS) {
+            phase = Phase.HEROES
+            heroIndex = 0
+        }
+    }
+
+    /** 2) Kahramanlar sağ üst bölgeye. */
+    private suspend fun heroPhase(frame: Frame) {
+        val d = deployer ?: return
+        if (heroIndex >= SLOT_HEROES.size) {
+            phase = Phase.SPELLS
+            spellIndex = 0
+            return
+        }
+        val slot = SLOT_HEROES[heroIndex]
+        tapCard(frame, slot)
+        delay(150)
+        place(frame, { d.heroPoint(heroIndex) })
+        heroIndex++
+        if (heroDeployAt == 0L) heroDeployAt = SystemClock.elapsedRealtime()
+        svc.log("Kahraman $heroIndex → sağ üst")
+        if (heroIndex >= SLOT_HEROES.size) {
+            phase = Phase.SPELLS
+            spellIndex = 0
+        }
+    }
+
+    /** 3) Büyüler üssün ortasına (kral bölgesi); kart adedi kadar atış. */
+    private suspend fun spellPhase(frame: Frame) {
+        val d = deployer ?: return
+        if (spellIndex >= SLOT_SPELLS.size) {
+            phase = Phase.ABILITY
+            abilityIndex = 0
+            return
+        }
+        val slot = SLOT_SPELLS[spellIndex]
+        if (spellCasts[spellIndex] == 0) {
+            spellCasts[spellIndex] = (readCount(frame, slot) ?: 1).coerceIn(1, 8)
+            svc.log("Büyü ${spellIndex + 1}: ${spellCasts[spellIndex]} atış")
+        }
+        for (k in 0 until spellCasts[spellIndex]) {
+            if (!svc.running) return
+            tapCard(frame, slot)
+            delay(120)
+            place(frame, { d.nextSpellPoint() })
+            delay(TAP_GAP_MS)
+        }
+        spellIndex++
+        if (spellIndex >= SLOT_SPELLS.size) {
+            phase = Phase.ABILITY
+            abilityIndex = 0
+        }
+    }
+
+    /** 4) Kahraman bırakıldıktan 10 sn sonra kartlara tekrar dokun = yetenek. */
+    private suspend fun abilityPhase(frame: Frame, now: Long) {
+        if (heroDeployAt != 0L && now - heroDeployAt < HERO_ABILITY_DELAY_MS) {
+            svc.log("Yetenek için ${(HERO_ABILITY_DELAY_MS - (now - heroDeployAt)) / 1000} sn")
+            delay(150)
+            return
+        }
+        if (abilityIndex >= SLOT_HEROES.size) {
+            buildFlush(frame)
+            phase = Phase.FLUSH
+            return
+        }
+        tapCard(frame, SLOT_HEROES[abilityIndex])
+        abilityIndex++
+        svc.log("Kahraman yeteneği $abilityIndex")
+        delay(600)
+    }
+
+    /** 5) Elde kalan kartlar: askerler geçerli zemine, büyüler üs merkezine boşaltılır. */
+    private fun buildFlush(frame: Frame) {
+        flushSlots.clear()
+        flushIsSpell.clear()
+        // x40 kartı her zaman denenir: geçersiz yere dokunulduğu için içeride asker kalmış olabilir
+        flushSlots.add(SLOT_TOKENS)
+        flushIsSpell.add(false)
+        flushSlots.add(SLOT_TROOP2)
+        flushIsSpell.add(false)
+        for (s in SLOT_SPELLS) {
+            flushSlots.add(s)
+            flushIsSpell.add(true)
+        }
+        flushIndex = 0
+        flushRound = 0
+        svc.log("Kalan kartlar boşaltılıyor (x40 dahil)")
+    }
+
+    private suspend fun flushPhase(frame: Frame) {
+        val d = deployer ?: return
+        if (flushIndex >= flushSlots.size) {
+            phase = Phase.WAIT
+            return
+        }
+        val slot = flushSlots[flushIndex]
+        val isSpell = flushIsSpell[flushIndex]
+        if (flushRound == 0) {
+            tapCard(frame, slot)
+            delay(150)
+        }
+        var placed = 0
+        for (i in 0 until FLUSH_TAPS) {
+            if (!svc.running) return
+            val ok = place(frame, { if (isSpell) d.nextSpellPoint() else d.anyFree() })
+            if (!ok) break
+            placed++
+            delay(TAP_GAP_MS)
+        }
+        flushRound++
+        if (flashCountCheck(frame, slot) && flushRound < FLUSH_ROUNDS) {
+            svc.log("Kart ${slot + 1}: kalan var → tekrar")
+            return
+        }
+        if (placed == 0) svc.log("Kart ${slot + 1}: uygun nokta bulunamadı")
+        flushIndex++
+        flushRound = 0
+    }
+
+    /** Kartın sol üst köşesindeki "xNN" sayacı hâlâ duruyor mu? (okunamazsa hayır) */
+    private fun flashCountCheck(frame: Frame, slot: Int): Boolean {
+        val left = readCount(frame, slot) ?: return false
+        return left > 0
+    }
+
+    private fun readCount(frame: Frame, slot: Int): Int? {
+        val x = CARD_LBL_X[slot.coerceIn(0, CARD_LBL_X.size - 1)]
+        return Ocr.readCount(frame.full, x[0], CARD_LBL_Y0, x[1], CARD_LBL_Y1)
+    }
+
+    // ------------------------------------------------------------- teslim
+
+    private suspend fun startRetreat(frame: Frame, now: Long) {
+        releaseMap()
+        stage = Stage.RETREAT
+        retreatAt = now
+        lastTapScene = Scene.ATTACK_BATTLE
+        lastTapAt = now
+        svc.log("70 sn doldu → Teslim Ol")
+        tapRef(frame, SURRENDER_X.toFloat(), SURRENDER_Y.toFloat())
+    }
+
+    private suspend fun retreat(frame: Frame, scene: Scene, now: Long) {
+        if (retreatAt > 0 && now - retreatAt > 120_000L) {
+            svc.stopWithWarning("⚠ Savaştan çıkılamadı, durdu")
+            return
+        }
+        when (scene) {
+            Scene.SURRENDER_CONFIRM ->
+                act(frame, scene, now, "Tamam (teslim onayı)", RETREAT_ATTEMPTS) {
+                    tapRef(frame, TAMAM_X.toFloat(), TAMAM_Y.toFloat())
+                }
+            Scene.RESULT -> {
+                finishAttack()
+                act(frame, scene, now, "Eve Dön", RETREAT_ATTEMPTS) {
+                    tapRef(frame, EVE_DON_X.toFloat(), EVE_DON_Y.toFloat())
+                }
+            }
+            Scene.HOME -> {
+                finishAttack()
+                svc.log("Köye dönüldü")
+            }
+            else -> act(frame, scene, now, "Teslim Ol", RETREAT_ATTEMPTS) {
+                tapRef(frame, SURRENDER_X.toFloat(), SURRENDER_Y.toFloat())
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- yardımcı
+
+    /** Tek dokunuşluk sahneler: dokun, ekran değişimini bekle, gerekirse tekrar dene. */
+    private suspend fun act(
+        frame: Frame,
+        scene: Scene,
+        now: Long,
+        label: String,
+        maxTries: Int = MAX_ATTEMPTS,
+        tap: suspend () -> Unit
+    ) {
+        if (scene == lastTapScene) {
+            if (now - lastTapAt < WAIT_MS) {
+                svc.log("$label sonrası ekran bekleniyor")
+                return
+            }
+            if (attempts >= maxTries) {
+                svc.stopWithWarning("⚠ Ekran değişmedi ($label), durdu")
+                return
+            }
+        } else {
+            attempts = 0
+        }
+        attempts++
+        lastTapScene = scene
+        lastTapAt = now
+        svc.log(label)
+        tap()
+    }
+
+    /**
+     * Noktayı geçerli bir yere bırakır: seçilen nokta canlı karede geçersizse
+     * (bina/kaya/ağaç üstü, çizgi içi) sıradaki adayı dener.
+     * @param picker sonraki adayı üreten fonksiyon
+     */
+    private suspend fun place(
+        frame: Frame,
+        picker: (Boolean) -> Int,
+        maxTries: Int = 4
+    ): Boolean {
+        val live = Vision(frame.small)
+        var last = -1
+        for (i in 0 until maxTries) {
+            val p = picker(i > 0)
+            if (p < 0) break
+            last = p
+            val ok = deployer?.valid(p, live) ?: false
+            if (ok || i == maxTries - 1) {
+                tapPoint(frame, p)
+                return true
+            }
+        }
+        if (last < 0) return false
+        tapPoint(frame, last)
+        return true
+    }
+
+    private suspend fun tapCard(frame: Frame, slot: Int) {
+        tapRef(frame, CARD_X[slot.coerceIn(0, CARD_X.size - 1)].toFloat(), CARD_TAP_Y.toFloat())
+    }
+
+    private suspend fun tapPoint(frame: Frame, p: Int) {
+        val d = deployer ?: return
+        tapRef(frame, d.xOf(p).toFloat(), d.yOf(p).toFloat())
+    }
+
+    private suspend fun tapRef(frame: Frame, xRef: Float, yRef: Float) {
+        Ref.map(xRef, yRef, frame.w, frame.h, pt)
+        svc.tap(pt.x, pt.y)
+    }
+}
