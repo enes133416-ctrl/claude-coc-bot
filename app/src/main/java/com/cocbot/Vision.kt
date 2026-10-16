@@ -117,6 +117,21 @@ class Vision(private val bmp: Bitmap) {
         return !nearRedLine(xRef, yRef)
     }
 
+    /**
+     * Gevşek zemin testi: freeGround'dan daha toleranslı. Çim yamaları, hafif dokulu
+     * zemin ve yol kenarları kabul edilir; su, çok koyu ağaç kümeleri ve kırmızı çizgi elenir.
+     * Havuzun boş kalıp askerlerin "bırakılamaması" sorununu önlemek için kullanılır.
+     */
+    fun lenientGround(xRef: Int, yRef: Int): Boolean {
+        val spread = mean(xRef, yRef, 4, rgb)
+        if (spread > 150) return false
+        val r = rgb[0]; val g = rgb[1]; val b = rgb[2]
+        if (r + g + b < 120) return false
+        if (b > g + 12) return false
+        if (r > g + 45) return false
+        return !nearRedLine(xRef, yRef)
+    }
+
     /** [yRef] satırındaki kırmızı çizginin yatay aralığı; çizgi yoksa null. */
     fun redRow(yRef: Int): IntArray? {
         val y = gy(yRef)
