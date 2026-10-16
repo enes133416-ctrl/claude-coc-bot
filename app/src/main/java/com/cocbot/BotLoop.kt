@@ -11,7 +11,7 @@ import kotlinx.coroutines.delay
  *
  * Köy → Savaş menüsü → Ordu → rakip önizleme → savaş → sonuç → köy
  *
- * Keşifte ganimet 3M'nin altındaysa "İleri" ile yeni köy aranır, üstündeyse saldırı planı işler:
+ * Keşifte ganimet 1.6M'nin altındaysa "İleri" ile yeni köy aranır, üstündeyse saldırı planı işler:
  *   1) x40 asker kartı: 10'ar asker, 10 sn arayla 4 grup (40 asker) ve hepsi birbirinden uzak noktalara
  *   2) kahramanlar sağ üst bölgeye, büyüler üssün ortasına (kral bölgesi)
  *   3) kahramanlar bırakıldıktan 10 sn sonra kartlara tekrar dokunarak yetenekler
@@ -24,7 +24,7 @@ class BotLoop(private val svc: BotService) {
         const val WAIT_MS = 2000L            // dokunuş sonrası ekran değişimi bekleme üst sınırı
         const val MAX_ATTEMPTS = 3           // aynı sahnede art arda en fazla deneme
         const val RETREAT_ATTEMPTS = 8       // teslim ol / Tamam / Eve Dön için deneme sayısı
-        const val LOOT_LIMIT = 3_000_000L    // altın + iksir bunu geçerse saldır
+        const val LOOT_LIMIT = 1_600_000L    // altın + iksir bunu geçerse saldır
         const val TAP_GAP_MS = 220L          // bırakma dokunuşları arası bekleme
         const val UNKNOWN_WARN_MS = 30_000L
         const val BATTLE_WARN_MS = 240_000L
@@ -224,10 +224,10 @@ class BotLoop(private val svc: BotService) {
             prevVillage = cur
             ileriAt = now
             pending = null
-            svc.log("Toplam $total ≤ 3M → İleri")
+            svc.log("Toplam $total ≤ $LOOT_LIMIT → İleri")
             tapRef(frame, 2220f, 1148f)
         } else {
-            svc.log("Toplam $total > 3M → saldırı başlıyor")
+            svc.log("Toplam $total > $LOOT_LIMIT → saldırı başlıyor")
             beginAttack(now)
             tokenPhase(frame, 0L)
         }

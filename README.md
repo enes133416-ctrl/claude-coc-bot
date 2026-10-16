@@ -31,7 +31,7 @@ Bu deponun kökünde hazır bir Gradle projesi var (`app/`, `build.gradle.kts`, 
 **Tur:** Köy → Savaş → Eşleşme Bul → Ordu → Saldır! → rakip önizlemesi → savaş → sonuç → köy
 
 ### Keşif
-Ganimet (altın + iksir) okunur. Toplam **3M**'nin altındaysa **İleri** ile yeni köy aranır.
+Ganimet (altın + iksir) okunur. Toplam **1.6M**'nin altındaysa **İleri** ile yeni köy aranır.
 Üstündeyse saldırı planı çalışır.
 
 ### Saldırı planı
