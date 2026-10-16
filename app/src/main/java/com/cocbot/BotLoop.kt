@@ -25,7 +25,7 @@ class BotLoop(private val svc: BotService) {
         const val MAX_ATTEMPTS = 3           // aynı sahnede art arda en fazla deneme
         const val RETREAT_ATTEMPTS = 8       // teslim ol / Tamam / Eve Dön için deneme sayısı
         const val LOOT_LIMIT = 3_000_000L    // altın + iksir bunu geçerse saldır
-        const val TAP_GAP_MS = 300L          // bırakma dokunuşları arası bekleme
+        const val TAP_GAP_MS = 220L          // bırakma dokunuşları arası bekleme
         const val UNKNOWN_WARN_MS = 30_000L
         const val BATTLE_WARN_MS = 240_000L
 
@@ -37,7 +37,7 @@ class BotLoop(private val svc: BotService) {
         const val BATTLE_LIMIT_MS = 70_000L  // 70 sn sonra teslim ol
         const val BATTLE_HARD_LIMIT_MS = 95_000L
         const val FLUSH_TAPS = 4             // kart başına boşaltma dokunuşu
-        const val FLUSH_ROUNDS = 2           // sayaç hâlâ görünüyorsa tekrar sayısı
+        const val FLUSH_ROUNDS = 4           // sayaç hâlâ görünüyorsa tekrar sayısı
 
         // Kart yuvaları (0 tabanlı) — referans 2419x1512
         val CARD_X = intArrayOf(326, 528, 704, 874, 1043, 1232, 1401, 1571, 1740, 1900)
@@ -82,6 +82,7 @@ class BotLoop(private val svc: BotService) {
     private var phase = Phase.TOKENS
     private var attackStart = 0L
     private var heroDeployAt = 0L
+    private var lastGroupEndAt = 0L
     private var groupCount = 0
     private var tokenPlaced = 0
     private var heroIndex = 0
@@ -239,6 +240,7 @@ class BotLoop(private val svc: BotService) {
         phase = Phase.TOKENS
         attackStart = if (now > 0) now else SystemClock.elapsedRealtime()
         heroDeployAt = 0L
+        lastGroupEndAt = 0L
         groupCount = 0
         tokenPlaced = 0
         heroIndex = 0
@@ -316,6 +318,12 @@ class BotLoop(private val svc: BotService) {
             return
         }
 
+        // 70 sn dolduysa hangi aşamada olursa olsun teslim ol
+        if (elapsed >= BATTLE_LIMIT_MS) {
+            startRetreat(frame, now)
+            return
+        }
+
         when (phase) {
             Phase.TOKENS -> tokenPhase(frame, elapsed)
             Phase.HEROES -> heroPhase(frame)
@@ -335,7 +343,10 @@ class BotLoop(private val svc: BotService) {
     private suspend fun tokenPhase(frame: Frame, elapsed0: Long) {
         val d = deployer ?: return
         var elapsed = elapsed0
-        while (groupCount < TOKEN_GROUPS && elapsed >= groupCount * GROUP_DELAY_MS) {
+        // her grup, bir önceki grubun BİTİŞİNDEN 10 sn sonra başlar
+        while (groupCount < TOKEN_GROUPS &&
+            (groupCount == 0 || SystemClock.elapsedRealtime() - lastGroupEndAt >= GROUP_DELAY_MS)
+        ) {
             tapCard(frame, SLOT_TOKENS)
             delay(150)
             var placed = 0
@@ -346,12 +357,13 @@ class BotLoop(private val svc: BotService) {
                     if (!firstDone && !again) { firstDone = true; d.first() }
                     else d.anyFree()
                 })
-                if (!ok) break
+                if (!ok) { delay(TAP_GAP_MS); continue }
                 placed++
                 tokenPlaced++
                 delay(TAP_GAP_MS)
             }
             groupCount++
+            lastGroupEndAt = SystemClock.elapsedRealtime()
             svc.log("Asker grubu $groupCount/$TOKEN_GROUPS: $placed (toplam $tokenPlaced)")
             elapsed = SystemClock.elapsedRealtime() - attackStart
         }
@@ -374,7 +386,7 @@ class BotLoop(private val svc: BotService) {
         delay(150)
         place(frame, { d.heroPoint(heroIndex) })
         heroIndex++
-        if (heroDeployAt == 0L) heroDeployAt = SystemClock.elapsedRealtime()
+        heroDeployAt = SystemClock.elapsedRealtime()   // yetenek sayacı SON kahramandan başlar
         svc.log("Kahraman $heroIndex → sağ üst")
         if (heroIndex >= SLOT_HEROES.size) {
             phase = Phase.SPELLS
@@ -392,14 +404,14 @@ class BotLoop(private val svc: BotService) {
         }
         val slot = SLOT_SPELLS[spellIndex]
         if (spellCasts[spellIndex] == 0) {
-            spellCasts[spellIndex] = (readCount(frame, slot) ?: 1).coerceIn(1, 8)
+            spellCasts[spellIndex] = (readCount(frame, slot) ?: 3).coerceIn(1, 8)
             svc.log("Büyü ${spellIndex + 1}: ${spellCasts[spellIndex]} atış")
         }
         for (k in 0 until spellCasts[spellIndex]) {
             if (!svc.running) return
             tapCard(frame, slot)
             delay(120)
-            place(frame, { d.nextSpellPoint() })
+            tapPoint(frame, d.nextSpellPoint())
             delay(TAP_GAP_MS)
         }
         spellIndex++
@@ -460,13 +472,22 @@ class BotLoop(private val svc: BotService) {
         var placed = 0
         for (i in 0 until FLUSH_TAPS) {
             if (!svc.running) return
-            val ok = place(frame, { if (isSpell) d.nextSpellPoint() else d.anyFree() })
-            if (!ok) break
+            if (isSpell) {
+                tapPoint(frame, d.nextSpellPoint())
+            } else {
+                if (!place(frame, { d.anyFree() })) continue
+            }
             placed++
             delay(TAP_GAP_MS)
         }
         flushRound++
-        if (flashCountCheck(frame, slot) && flushRound < FLUSH_ROUNDS) {
+        val maxRounds = if (slot == SLOT_TOKENS) 12 else FLUSH_ROUNDS
+        delay(250)
+        val fresh = svc.grab()
+        val left = if (fresh != null) {
+            try { flushCountLeft(fresh, slot) } finally { fresh.recycle() }
+        } else flushCountLeft(frame, slot)
+        if (left && flushRound < maxRounds) {
             svc.log("Kart ${slot + 1}: kalan var → tekrar")
             return
         }
@@ -476,8 +497,12 @@ class BotLoop(private val svc: BotService) {
     }
 
     /** Kartın sol üst köşesindeki "xNN" sayacı hâlâ duruyor mu? (okunamazsa hayır) */
-    private fun flashCountCheck(frame: Frame, slot: Int): Boolean {
-        val left = readCount(frame, slot) ?: return false
+    private fun flushCountLeft(frame: Frame, slot: Int): Boolean {
+        val left = readCount(frame, slot)
+        if (left == null) {
+            // okunamadı: x40 / büyü kartında sayaç yoksa kart bitmiş demektir; yine de x40 için 40 dokunuşa kadar zorla
+            return slot == SLOT_TOKENS && tokenPlaced + flushRound * FLUSH_TAPS < 44
+        }
         return left > 0
     }
 
