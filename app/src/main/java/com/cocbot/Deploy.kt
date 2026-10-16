@@ -138,7 +138,8 @@ class Deployer(private val v: Vision) {
     private fun rank() {
         for (i in pool.indices) {
             val spread = v.mean(xOf(pool[i]), yOf(pool[i]), 5, rgb)
-            score[i] = (rgb[0] + rgb[1] + rgb[2]) - spread * 2
+            score[i] = (rgb[0] + rgb[1] + rgb[2]) - spread * 2 +
+                (if (v.freeGround(xOf(pool[i]), yOf(pool[i]))) 1000 else 0)
         }
         val idx = pool.indices.sortedByDescending { score[it] }
         val np = ArrayList<Int>(pool.size)
@@ -166,7 +167,7 @@ class Deployer(private val v: Vision) {
             // kırmızı çizgi görünmüyorsa (keşif karesi): üs merkezine uzaklık ile dış alan tahmini
             if (hypot((x - centerX).toFloat(), (y - centerY).toFloat()) < OUTSIDE_R) return false
         }
-        return v.freeGround(x, y)
+        return v.lenientGround(x, y)
     }
 
     /**
@@ -235,7 +236,12 @@ class Deployer(private val v: Vision) {
             val p = pick(d)
             if (p >= 0) return p
         }
-        return -1
+        // Havuz tükendiyse hiçbir zaman -1 dönme: noktaları serbest bırak, en uzağı seç
+        if (pool.isEmpty()) return -1
+        for (i in taken.indices) taken[i] = false
+        val p = pick(0f)
+        if (p >= 0) return p
+        return pool[0]
     }
 
     /**
@@ -244,7 +250,11 @@ class Deployer(private val v: Vision) {
      */
     fun heroPoint(index: Int): Int {
         val cand = heroCandidates()
-        if (cand.isEmpty()) return zonePoint(HERO_SPOTS[0], true)
+        if (cand.isEmpty()) {
+            val z = zonePoint(HERO_SPOTS[0], true)
+            heroPts.add(z)
+            return z
+        }
         cand.sortBy { hypot((xOf(it) - centerX).toFloat(), (yOf(it) - centerY).toFloat()) }
         var pick = cand[0]
         for (minD in floatArrayOf(220f, 150f, 100f, 40f, 0f)) {
@@ -259,6 +269,7 @@ class Deployer(private val v: Vision) {
         val idx = pool.indexOf(pick)
         if (idx >= 0) taken[idx] = true
         used.add(pick)
+        heroPts.add(pick)
         return pick
     }
 
@@ -284,9 +295,11 @@ class Deployer(private val v: Vision) {
     fun spellPoint(index: Int): Int = zonePoint(SPELL_SPOTS[index % SPELL_SPOTS.size], false)
 
     private val spellUsed = ArrayList<Int>(32)
+    private val heroPts = ArrayList<Int>(8)
 
     /** Büyü bölgesinden (üssün ortası) sıradaki nokta; aynı nokta iki kez seçilmez. */
     fun nextSpellPoint(): Int {
+        if (heroPts.isNotEmpty()) return nextSpellNearHeroes()
         for (attempt in 0 until 48) {
             val seed = spellUsed.size
             val p = if (seed < SPELL_SPOTS.size) spellPoint(seed) else spiralPoint(seed)
@@ -299,6 +312,23 @@ class Deployer(private val v: Vision) {
             if (attempt > 40) break
         }
         val p = spiralPoint(spellUsed.size + 1)
+        spellUsed.add(p)
+        return p
+    }
+
+    /** Büyüler kahramanların bırakıldığı bölgeye: kahraman noktalarının merkezi çevresinde sarmal. */
+    private fun nextSpellNearHeroes(): Int {
+        var sx = 0; var sy = 0
+        for (h in heroPts) { sx += xOf(h); sy += yOf(h) }
+        val cx = sx / heroPts.size
+        val cy = sy / heroPts.size
+        val seed = spellUsed.size
+        val r = if (seed == 0) 0f else 45f + 30f * kotlin.math.sqrt(seed.toFloat())
+        val a = seed * 2.39996
+        val p = pack(
+            (cx + (r * cos(a)).toInt()).coerceIn(X_MIN, X_MAX),
+            (cy + (r * sin(a)).toInt()).coerceIn(Y_MIN, Y_MAX)
+        )
         spellUsed.add(p)
         return p
     }
@@ -325,7 +355,7 @@ class Deployer(private val v: Vision) {
         val y = yOf(p)
         if (forbidden(x, y)) return false
         if (hasLine && insideBoundary(x, y)) return false
-        return live.freeGround(x, y)
+        return live.lenientGround(x, y)
     }
 
     private fun zonePoint(frac: FloatArray, needFree: Boolean): Int {
