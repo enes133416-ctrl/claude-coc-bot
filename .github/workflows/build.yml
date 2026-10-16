@@ -10,9 +10,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: proje.zip yuklendiyse ac
+      - name: proje.zip yuklendiyse ac (yalnizca kaynak yoksa)
         run: |
-          if [ -f proje.zip ]; then unzip -o proje.zip; fi
+          if [ ! -f app/build.gradle.kts ] && [ -f proje.zip ]; then
+            echo "Kaynak yok, proje.zip aciliyor"
+            unzip -o proje.zip
+          else
+            echo "Kaynak deposunun kokunde; proje.zip kullanilmadi"
+          fi
 
       - uses: actions/setup-java@v4
         with:
