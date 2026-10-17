@@ -1,7 +1,7 @@
 # CoC Bot (Android, derleme GitHub Actions'ta)
 
 Erişilebilirlik servisi ile Clash of Clans ekranını okuyup dokunuş gönderen bir bot.
-Sürüm **2.1** — saldırı öncesi otomatik uzaklaştırma (zoom-out), kalan asker boşaltma, saldırı planı, teslim olma ve eve dönme adımları otomatiktir.
+Sürüm **2.2** — saldırı öncesi otomatik uzaklaştırma (zoom-out), kalan askerleri tek tek köşelere bırakma, 85. saniyede otomatik teslim olma adımları otomatiktir.
 
 ## 1) Depoya yükleme ve APK indirme
 
@@ -43,7 +43,8 @@ Ganimet (altın + iksir) okunur. Toplam **1.6M**'nin altındaysa **İleri** ile 
    Her asker, kullanılan noktaların **en uzağına** bırakılır (min. 150 px, kırmızı çizginin dışında,
    bina/ağaç/su üstüne asla). Yani askerler birbirine yakın düşmez.
 1b. **Kalan askerler:** 4 grup bitince (≈40. sn) x40 kartının **sayacı okunur**; asker kalmışsa
-   (ör. 15) hepsi **rastgele** geçerli noktalara, **~0,35 sn aralıklarla** boşaltılır.
+   (ör. 15) hepsi **tek tek, sırayla farklı köşelere** (sol üst → sağ üst → sol alt → sağ alt)
+   bırakılır. Köşeler her zaman düz çimdir; oyun dokunuşu reddetmez, sayaç güvenle düşer.
 2. **Kahramanlar:** 3 kahraman kartı sırayla basılıp **sağ üst** bölgeye bırakılır.
 3. **Büyüler:** herolardan sonra büyü kartları basılır ve **üssün ortasına (kral bölgesi)** atılır;
    atış sayısı karttaki `xN` etiketinden okunur.
@@ -54,7 +55,11 @@ Ganimet (altın + iksir) okunur. Toplam **1.6M**'nin altındaysa **İleri** ile 
    yani geçersiz yere dokunulmuş olsa bile **hiç asker/büyü kartta kalmaz**.
 
 ### Savaştan çıkış
-Savaş başlangıcından **70 sn** sonra (plan erken bitse de bekleme fazında sayılır):
+**70-85 sn arası:** kartlarda kalan son askerler (x40 ve ikinci asker kartı) **tek tek,
+sırayla farklı köşelere** bırakılır. Sayaç okunamadıysa yine de denenir (boş kartla dokunmak
+zararsızdır).
+
+Savaş başlangıcından **85 sn** sonra (plan erken bitse de bekleme fazında sayılır):
 1. Sol alttaki kırmızı **Teslim Ol** butonuna basılır,
 2. çıkan "Teslim olalım mı?" ekranında yeşil **Tamam**'a basılır,
 3. savaş bitiş ekranında **Eve Dön**'e basılır → köye dönülür ve tur baştan başlar.

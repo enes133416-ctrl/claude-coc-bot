@@ -15,12 +15,13 @@ import kotlinx.coroutines.delay
  *   0) ilk asker bırakılmadan önce ekran iki parmakla sıkıştırılarak (pinch) olabildiğince
  *      uzaklaştırılır; böylece büyük köyler de ekrana sığar, bırakma alanı bulunur
  *   1) x40 asker kartı: 10'ar asker, 10 sn arayla 4 grup (40 asker) ve hepsi birbirinden uzak noktalara
- *   1b) gruplar bitince (~40. sn) kartta asker kalmışsa (sayaçtan okunur) rastgele noktalara,
- *       aralıklarla boşaltılır
+ *   1b) gruplar bitince (~40. sn) kartta asker kalmışsa (sayaçtan okunur) askerler tek tek,
+ *       sırayla farklı köşelere bırakılır
  *   2) kahramanlar sağ üst bölgeye, büyüler üssün ortasına (kral bölgesi)
  *   3) kahramanlar bırakıldıktan 10 sn sonra kartlara tekrar dokunarak yetenekler
- *   4) elde kalan tüm kartlar (asker ve büyü) geçerli noktalara boşaltılır
- *   5) savaş başlangıcından 70 sn sonra "Teslim Ol" → onayda "Tamam" → sonuçta "Eve Dön"
+ *   4) elde kalan tüm kartlar (asker ve büyü) köşeler dahil geçerli noktalara boşaltılır
+ *   5) 70-85 sn arası kartlarda kalan son askerler yine tek tek, sırayla farklı köşelere bırakılır
+ *   6) 85. sn'de "Teslim Ol" → onayda "Tamam" → sonuçta "Eve Dön"
  */
 class BotLoop(private val svc: BotService) {
 
@@ -38,10 +39,12 @@ class BotLoop(private val svc: BotService) {
         const val TOKEN_PER_GROUP = 10       // her grupta 10 asker
         const val GROUP_DELAY_MS = 10_000L   // gruplar arası 10 sn
         const val HERO_ABILITY_DELAY_MS = 10_000L
-        const val BATTLE_LIMIT_MS = 70_000L  // 70 sn sonra teslim ol
+        const val BATTLE_LIMIT_MS = 85_000L  // 85 sn sonra teslim ol
         const val BATTLE_HARD_LIMIT_MS = 95_000L
         const val FLUSH_TAPS = 4             // kart başına boşaltma dokunuşu
         const val FLUSH_ROUNDS = 4           // sayaç hâlâ görünüyorsa tekrar sayısı
+        const val FINAL_DROP_MS = 70_000L    // 70 sn sonra kalan askerler tek tek köşelere
+        const val FINAL_GAP_MS = 450L        // son bırakmalar arası bekleme
 
         // Uzaklaştırma (zoom-out) — saldırı öncesi
         const val ZOOM_PINCHES = 2           // sıkıştırma sayısı
@@ -55,10 +58,10 @@ class BotLoop(private val svc: BotService) {
         const val ZOOM_Y_BOT_END = 812f      // alt parmağın bitişi (merkeze doğru)
 
         // 40. saniyeden sonra kartta kalan askerler
-        const val LEFTOVER_BATCH = 6         // tur başına bırakılan asker
-        const val LEFTOVER_GAP_MS = 350L     // bırakmalar arası bekleme
+        const val LEFTOVER_BATCH = 8         // tur başına bırakılan asker
+        const val LEFTOVER_GAP_MS = 400L     // bırakmalar arası bekleme
         const val LEFTOVER_MAX_ROUNDS = 8    // güvenlik: en fazla tur sayısı
-        const val LEFTOVER_MAX_MS = 55_000L  // bu süreyi aşarsa kahramanlara geçilir
+        const val LEFTOVER_MAX_MS = 58_000L  // bu süreyi aşarsa kahramanlara geçilir
         const val LEFTOVER_ASSUME_TOTAL = 42 // sayaç okunamazsa varsayılan toplam asker
 
         // Kart yuvaları (0 tabanlı) — referans 2419x1512
@@ -383,8 +386,11 @@ class BotLoop(private val svc: BotService) {
             Phase.FLUSH -> flushPhase(frame)
             Phase.WAIT -> if (elapsed >= BATTLE_LIMIT_MS) {
                 startRetreat(frame, now)
+            } else if (elapsed >= FINAL_DROP_MS) {
+                // 70-85 sn arası: kartlarda kalan son askerler tek tek köşelere bırakılır
+                finalPhase(frame)
             } else {
-                svc.log("Teslim olmaya ${(BATTLE_LIMIT_MS - elapsed) / 1000} sn")
+                svc.log("Son askerler için ${(FINAL_DROP_MS - elapsed) / 1000} sn")
                 delay(150)
             }
         }
@@ -463,8 +469,9 @@ class BotLoop(private val svc: BotService) {
     }
 
     /**
-     * 1b) Gruplar bitince x40 kartının sayacı okunur; asker kalmışsa (ör. 15)
-     * hepsi RASTGELE geçerli noktalara, [LEFTOVER_GAP_MS] aralıklarla boşaltılır.
+     * 1b) Gruplar bitince x40 kartının sayacı okunur; asker kalmışsa (ör. 15) hepsi
+     * TEK TEK ve sırayla FARKLI KÖŞELERE bırakılır (sol üst → sağ üst → sol alt → sağ alt).
+     * Köşeler her zaman düz çimdir; oyun dokunuşu reddetmez, sayaç güvenle düşer.
      * Sayaç okunamazsa şimdiye kadar bırakılan asker sayısından tahmin yapılır.
      */
     private suspend fun leftoverPhase(frame: Frame, elapsed: Long) {
@@ -496,7 +503,7 @@ class BotLoop(private val svc: BotService) {
         var placedNow = 0
         for (i in 0 until n) {
             if (!svc.running) return
-            if (place(frame, { _ -> d.randomPoint() })) {
+            if (place(frame, { _ -> d.cornerNext() })) {
                 placedNow++
                 leftoverDropped++
             }
@@ -607,7 +614,8 @@ class BotLoop(private val svc: BotService) {
             if (isSpell) {
                 tapPoint(frame, d.nextSpellPoint())
             } else {
-                if (!place(frame, { d.anyFree() })) continue
+                // askerler köşelere: köşeler her zaman düz çimdir, oyun dokunuşu reddetmez
+                if (!place(frame, { _ -> d.cornerNext() })) continue
             }
             placed++
             delay(TAP_GAP_MS)
@@ -643,6 +651,38 @@ class BotLoop(private val svc: BotService) {
         return Ocr.readCount(frame.full, x[0], CARD_LBL_Y0, x[1], CARD_LBL_Y1)
     }
 
+    /**
+     * 5) 70-85 sn arası: kartlarda kalan son askerler TEK TEK ve sırayla farklı
+     * köşelere bırakılır (her karede bir asker). Sayaç okunamadıysa yine de
+     * denenir — boş kartla dokunmak oyun için zararsızdır. 85 sn dolunca
+     * teslim olunur (bkz. [BATTLE_LIMIT_MS]).
+     */
+    private suspend fun finalPhase(frame: Frame) {
+        val d = deployer ?: return
+        val tTokens = readCount(frame, SLOT_TOKENS)
+        val tTroop2 = readCount(frame, SLOT_TROOP2)
+        // null = sayaç okunamadı: kart boş olabilir ama asker kalmış da olabilir → yine de dene
+        val useTokens = tTokens == null || tTokens > 0
+        val useTroop2 = tTroop2 == null || tTroop2 > 0
+        if (!useTokens && !useTroop2) {
+            svc.log("Kartlar boş, 85 sn'de teslim")
+            delay(300)
+            return
+        }
+        if (useTokens) {
+            tapCard(frame, SLOT_TOKENS)
+            delay(120)
+            place(frame, { _ -> d.cornerNext() })
+            delay(FINAL_GAP_MS)
+        }
+        if (useTroop2 && svc.running) {
+            tapCard(frame, SLOT_TROOP2)
+            delay(120)
+            place(frame, { _ -> d.cornerNext() })
+            delay(FINAL_GAP_MS)
+        }
+    }
+
     // ------------------------------------------------------------- teslim
 
     private suspend fun startRetreat(frame: Frame, now: Long) {
@@ -651,7 +691,7 @@ class BotLoop(private val svc: BotService) {
         retreatAt = now
         lastTapScene = Scene.ATTACK_BATTLE
         lastTapAt = now
-        svc.log("70 sn doldu → Teslim Ol")
+        svc.log("85 sn doldu → Teslim Ol")
         tapRef(frame, SURRENDER_X.toFloat(), SURRENDER_Y.toFloat())
     }
 

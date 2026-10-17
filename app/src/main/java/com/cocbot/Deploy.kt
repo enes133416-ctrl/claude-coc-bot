@@ -3,7 +3,6 @@ package com.cocbot
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
-import kotlin.random.Random
 
 /**
  * Dokunulmaması gereken arayüz bölgeleri. Hem bırakma noktası seçiminde
@@ -48,6 +47,17 @@ class Deployer(private val v: Vision) {
         /** Üs merkezine bu mesafeden yakın noktalar üssün içi sayılır (kırmızı çizgi yoksa kullanılır). */
         const val OUTSIDE_R = 560f
 
+        /**
+         * Kalan askerlerin bırakılacağı köşe hedefleri (referans koordinat, yasak
+         * arayüz bölgelerinin dışında): sol üst, sağ üst, sol alt, sağ alt.
+         */
+        val CORNERS = arrayOf(
+            intArrayOf(760, 210),      // sol üst (ganimet panelinin sağı)
+            intArrayOf(1700, 260),     // sağ üst (sayaçların solu)
+            intArrayOf(350, 1040),     // sol alt (Teslim Ol'un üstü)
+            intArrayOf(1850, 1060)     // sağ alt (İleri/Hasar'ın solu)
+        )
+
         /** Kahraman bölgesi: üs sınır kutusuna göre sağ üst (x,y oranı). */
         val HERO_SPOTS = arrayOf(
             floatArrayOf(0.80f, 0.24f),
@@ -75,7 +85,7 @@ class Deployer(private val v: Vision) {
     private val score = ArrayList<Int>(4096)
     private val used = ArrayList<Int>(128)
     private val rgb = IntArray(3)
-    private val rnd = Random
+    private var cornerIdx = 0
 
     private var hasLine = false
     private var bx0 = 0
@@ -247,30 +257,38 @@ class Deployer(private val v: Vision) {
     }
 
     /**
-     * Kalan askerler için havuzdan RASTGELE boş bir nokta.
-     * (Diğer seçiciler "kullanılanlardan en uzak" noktayı arar; burada amaç
-     * askerlerin haritaya dağınık ve rastgele bırakılması.) Havuz boşsa -1.
+     * Kalan askerler için sıradaki KÖŞE noktası: sol üst → sağ üst → sol alt → sağ alt
+     * şeklinde döner ve o köşeye en yakın boş havuz noktasını verir.
+     * Köşeler haritanın en dışında ve her zaman düz çim olduğu için kalan askerlerin
+     * bırakılması için en güvenli yerlerdir (oyun dokunuşu reddetmez). Havuz boşsa -1.
      */
-    fun randomPoint(): Int {
+    fun cornerNext(): Int {
         if (pool.isEmpty()) return -1
-        var anyFree = false
-        for (t in taken) if (!t) { anyFree = true; break }
-        if (!anyFree) for (i in taken.indices) taken[i] = false
-        for (attempt in 0 until 32) {
-            val i = rnd.nextInt(pool.size)
-            if (taken[i]) continue
-            taken[i] = true
-            used.add(pool[i])
-            return pool[i]
+        val c = CORNERS[cornerIdx % CORNERS.size]
+        cornerIdx++
+        var p = nearestFree(c)
+        if (p < 0) {                       // havuz tükendiyse noktaları serbest bırak, yeniden dene
+            for (i in taken.indices) taken[i] = false
+            p = nearestFree(c)
         }
+        if (p < 0) return pack(c[0].coerceIn(X_MIN, X_MAX), c[1].coerceIn(Y_MIN, Y_MAX))
+        return p
+    }
+
+    /** [c] hedefine en yakın boş havuz noktası; yoksa -1. */
+    private fun nearestFree(c: IntArray): Int {
+        var bi = -1
+        var bestD = Float.MAX_VALUE
         for (i in pool.indices) {
-            if (!taken[i]) {
-                taken[i] = true
-                used.add(pool[i])
-                return pool[i]
-            }
+            if (taken[i]) continue
+            val p = pool[i]
+            val dd = hypot((xOf(p) - c[0]).toFloat(), (yOf(p) - c[1]).toFloat())
+            if (dd < bestD) { bestD = dd; bi = i }
         }
-        return pool[0]
+        if (bi < 0) return -1
+        taken[bi] = true
+        used.add(pool[bi])
+        return pool[bi]
     }
 
     /**
