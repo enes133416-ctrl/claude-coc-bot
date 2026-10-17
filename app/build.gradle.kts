@@ -11,8 +11,8 @@ android {
         applicationId = "com.cocbot"
         minSdk = 30
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 5
+        versionName = "2.3"
     }
 
     buildTypes {
