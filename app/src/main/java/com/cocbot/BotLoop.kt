@@ -500,7 +500,7 @@ class BotLoop(private val svc: BotService) {
         // seçili kart varsa bırak (sürüklemeye asker sıkıştırmasın)
         tapCard(frame, SLOT_TOKENS)
         delay(200)
-        swipeRef(frame, PAN_X, PAN_Y_FROM, PAN_X, PAN_Y_TO, PAN_DRAG_MS)
+        swipeRef(frame, PAN_X, PAN_Y_FROM, PAN_Y_TO, PAN_DRAG_MS)
         releaseMap()          // görünüm değişti: alan yeniden taranacak
         battleScanned = false
         delay(PAN_SETTLE_MS)
