@@ -138,4 +138,30 @@ open class BotService : AccessibilityService() {
             if (!ok && cont.isActive) cont.resume(false)
         }
     }
+
+    /**
+     * İki parmaklı sıkıştırma (pinch). (x1,y1) ve (x2,y2) parmakları [durationMs] süresinde
+     * (tx1,ty1) ve (tx2,ty2) noktalarına kayar. Parmaklar birbirine yaklaşıyorsa
+     * harita uzaklaştırılır (zoom-out), uzaklaşıyorsa yaklaştırılır (zoom-in).
+     */
+    open suspend fun pinch(
+        x1: Float, y1: Float, x2: Float, y2: Float,
+        tx1: Float, ty1: Float, tx2: Float, ty2: Float,
+        durationMs: Long
+    ): Boolean {
+        if (!running) return false
+        val path1 = Path().apply { moveTo(x1, y1); lineTo(tx1, ty1) }
+        val path2 = Path().apply { moveTo(x2, y2); lineTo(tx2, ty2) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path1, 0, durationMs))
+            .addStroke(GestureDescription.StrokeDescription(path2, 0, durationMs))
+            .build()
+        return suspendCancellableCoroutine { cont ->
+            val ok = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription?) { if (cont.isActive) cont.resume(true) }
+                override fun onCancelled(g: GestureDescription?) { if (cont.isActive) cont.resume(false) }
+            }, null)
+            if (!ok && cont.isActive) cont.resume(false)
+        }
+    }
 }

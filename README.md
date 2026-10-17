@@ -1,7 +1,7 @@
 # CoC Bot (Android, derleme GitHub Actions'ta)
 
 Erişilebilirlik servisi ile Clash of Clans ekranını okuyup dokunuş gönderen bir bot.
-Sürüm **2.0** — saldırı planı, teslim olma ve eve dönme adımları otomatiktir.
+Sürüm **2.1** — saldırı öncesi otomatik uzaklaştırma (zoom-out), kalan asker boşaltma, saldırı planı, teslim olma ve eve dönme adımları otomatiktir.
 
 ## 1) Depoya yükleme ve APK indirme
 
@@ -35,10 +35,15 @@ Ganimet (altın + iksir) okunur. Toplam **1.6M**'nin altındaysa **İleri** ile 
 Üstündeyse saldırı planı çalışır.
 
 ### Saldırı planı
+0. **Uzaklaştırma:** ilk asker bırakılmadan önce ekran **iki parmakla sıkıştırılarak** (pinch)
+   olabildiğince uzaklaştırılır. Böylece büyük köyler de ekrana sığar, kırmızı çizgi ve bırakma
+   alanı görülür. Alan yine bulunamazsa ekran bir kez daha uzaklaştırılıp yeniden taranır.
 1. **Askerler:** sol alttaki **x40** kartına basılır ve **10'ar asker** bırakılır.
    Sonra **10 sn** beklenir, yine 10 asker… toplam **4 grup = 40 asker**.
    Her asker, kullanılan noktaların **en uzağına** bırakılır (min. 150 px, kırmızı çizginin dışında,
    bina/ağaç/su üstüne asla). Yani askerler birbirine yakın düşmez.
+1b. **Kalan askerler:** 4 grup bitince (≈40. sn) x40 kartının **sayacı okunur**; asker kalmışsa
+   (ör. 15) hepsi **rastgele** geçerli noktalara, **~0,35 sn aralıklarla** boşaltılır.
 2. **Kahramanlar:** 3 kahraman kartı sırayla basılıp **sağ üst** bölgeye bırakılır.
 3. **Büyüler:** herolardan sonra büyü kartları basılır ve **üssün ortasına (kral bölgesi)** atılır;
    atış sayısı karttaki `xN` etiketinden okunur.

@@ -3,6 +3,7 @@ package com.cocbot
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
+import kotlin.random.Random
 
 /**
  * Dokunulmaması gereken arayüz bölgeleri. Hem bırakma noktası seçiminde
@@ -74,6 +75,7 @@ class Deployer(private val v: Vision) {
     private val score = ArrayList<Int>(4096)
     private val used = ArrayList<Int>(128)
     private val rgb = IntArray(3)
+    private val rnd = Random
 
     private var hasLine = false
     private var bx0 = 0
@@ -241,6 +243,33 @@ class Deployer(private val v: Vision) {
         for (i in taken.indices) taken[i] = false
         val p = pick(0f)
         if (p >= 0) return p
+        return pool[0]
+    }
+
+    /**
+     * Kalan askerler için havuzdan RASTGELE boş bir nokta.
+     * (Diğer seçiciler "kullanılanlardan en uzak" noktayı arar; burada amaç
+     * askerlerin haritaya dağınık ve rastgele bırakılması.) Havuz boşsa -1.
+     */
+    fun randomPoint(): Int {
+        if (pool.isEmpty()) return -1
+        var anyFree = false
+        for (t in taken) if (!t) { anyFree = true; break }
+        if (!anyFree) for (i in taken.indices) taken[i] = false
+        for (attempt in 0 until 32) {
+            val i = rnd.nextInt(pool.size)
+            if (taken[i]) continue
+            taken[i] = true
+            used.add(pool[i])
+            return pool[i]
+        }
+        for (i in pool.indices) {
+            if (!taken[i]) {
+                taken[i] = true
+                used.add(pool[i])
+                return pool[i]
+            }
+        }
         return pool[0]
     }
 
