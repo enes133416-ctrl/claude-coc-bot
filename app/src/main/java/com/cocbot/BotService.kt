@@ -164,4 +164,20 @@ open class BotService : AccessibilityService() {
             if (!ok && cont.isActive) cont.resume(false)
         }
     }
+
+    /** Tek parmaklı sürükleme (swipe): (x1,y1)'den (x2,y2)'ye [durationMs] süresinde. Haritayı kaydırır. */
+    open suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean {
+        if (!running) return false
+        val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        return suspendCancellableCoroutine { cont ->
+            val ok = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription?) { if (cont.isActive) cont.resume(true) }
+                override fun onCancelled(g: GestureDescription?) { if (cont.isActive) cont.resume(false) }
+            }, null)
+            if (!ok && cont.isActive) cont.resume(false)
+        }
+    }
 }

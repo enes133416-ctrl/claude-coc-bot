@@ -48,23 +48,15 @@ class Deployer(private val v: Vision) {
         const val OUTSIDE_R = 560f
 
         /**
-         * Kalan askerlerin bırakılacağı köşe hedefleri (referans koordinat, yasak
-         * arayüz bölgelerinin dışında): sol üst, sağ üst, sol alt, sağ alt.
+         * Kalan askerlerin bırakılacağı yedek köşe hedefleri (referans koordinat, yasak
+         * arayüz bölgelerinin dışında). Kırmızı çizgi bulunursa [scan] bunların yerine
+         * üs kutusuna göre dinamik hedefler hesaplar.
          */
         val CORNERS = arrayOf(
             intArrayOf(760, 210),      // sol üst (ganimet panelinin sağı)
             intArrayOf(1700, 260),     // sağ üst (sayaçların solu)
             intArrayOf(350, 1040),     // sol alt (Teslim Ol'un üstü)
             intArrayOf(1850, 1060)     // sağ alt (İleri/Hasar'ın solu)
-        )
-
-        /** Kahraman bölgesi: üs sınır kutusuna göre sağ üst (x,y oranı). */
-        val HERO_SPOTS = arrayOf(
-            floatArrayOf(0.80f, 0.24f),
-            floatArrayOf(0.90f, 0.34f),
-            floatArrayOf(0.70f, 0.34f),
-            floatArrayOf(0.86f, 0.46f),
-            floatArrayOf(0.62f, 0.26f)
         )
 
         /** Büyü bölgesi: üssün ortası (kral/kale bölgesi). */
@@ -86,6 +78,7 @@ class Deployer(private val v: Vision) {
     private val used = ArrayList<Int>(128)
     private val rgb = IntArray(3)
     private var cornerIdx = 0
+    private val cornerTargets = ArrayList<IntArray>(8)
 
     private var hasLine = false
     private var bx0 = 0
@@ -134,7 +127,30 @@ class Deployer(private val v: Vision) {
         }
         rank()
         points = pool.size
+        computeCorners()
         return points > 0
+    }
+
+    /**
+     * Köşe hedefleri hesaplanır: kırmızı çizgi bulunduysa üs sınır kutusuna göre
+     * 8 dinamik hedef (4 kenar ortası + 4 çapraz, hepsi çizginin dışında);
+     * bulunamadıysa sabit [CORNERS] kullanılır. Dinamik hedefler sayesinde
+     * ekran kaydırıldıktan sonra da köşeler doğru yerleri gösterir.
+     */
+    private fun computeCorners() {
+        cornerTargets.clear()
+        if (hasLine) {
+            cornerTargets.add(intArrayOf(centerX, (by0 - 230).coerceAtLeast(Y_MIN)))
+            cornerTargets.add(intArrayOf((bx0 - 230).coerceAtLeast(X_MIN), centerY))
+            cornerTargets.add(intArrayOf((bx1 + 230).coerceAtMost(X_MAX), centerY))
+            cornerTargets.add(intArrayOf(centerX, (by1 + 260).coerceAtMost(Y_MAX)))
+            cornerTargets.add(intArrayOf((bx0 - 170).coerceAtLeast(X_MIN), (by0 - 120).coerceAtLeast(Y_MIN)))
+            cornerTargets.add(intArrayOf((bx1 + 170).coerceAtMost(X_MAX), (by0 - 120).coerceAtLeast(Y_MIN)))
+            cornerTargets.add(intArrayOf((bx0 - 170).coerceAtLeast(X_MIN), (by1 + 140).coerceAtMost(Y_MAX)))
+            cornerTargets.add(intArrayOf((bx1 + 170).coerceAtMost(X_MAX), (by1 + 140).coerceAtMost(Y_MAX)))
+        } else {
+            for (c in CORNERS) cornerTargets.add(c)
+        }
     }
 
     private fun add(x: Int, y: Int) {
@@ -257,14 +273,16 @@ class Deployer(private val v: Vision) {
     }
 
     /**
-     * Kalan askerler için sıradaki KÖŞE noktası: sol üst → sağ üst → sol alt → sağ alt
-     * şeklinde döner ve o köşeye en yakın boş havuz noktasını verir.
-     * Köşeler haritanın en dışında ve her zaman düz çim olduğu için kalan askerlerin
-     * bırakılması için en güvenli yerlerdir (oyun dokunuşu reddetmez). Havuz boşsa -1.
+     * Kalan askerler/kahramanlar için sıradaki KÖŞE noktası: [computeCorners] ile
+     * hesaplanan hedefler sırayla döner ve o hedefe en yakın boş havuz noktasını
+     * verir. Hedefler kırmızı çizgi kutusuna göre hesaplandığı için ekran
+     * kaydırılsa bile doğru yerleri gösterir. Köşeler her zaman düz çimdir;
+     * oyun dokunuşu reddetmez. Havuz boşsa -1.
      */
     fun cornerNext(): Int {
         if (pool.isEmpty()) return -1
-        val c = CORNERS[cornerIdx % CORNERS.size]
+        val targets: List<IntArray> = if (cornerTargets.isNotEmpty()) cornerTargets else CORNERS.toList()
+        val c = targets[cornerIdx % targets.size]
         cornerIdx++
         var p = nearestFree(c)
         if (p < 0) {                       // havuz tükendiyse noktaları serbest bırak, yeniden dene
@@ -291,62 +309,13 @@ class Deployer(private val v: Vision) {
         return pool[bi]
     }
 
-    /**
-     * Kahraman için sağ üst bölge: üs merkezinin sağ-üst tarafında, kırmızı çizginin
-     * hemen dışındaki geçerli noktalar arasından merkeze en yakın olanlar seçilir.
-     */
-    fun heroPoint(index: Int): Int {
-        val cand = heroCandidates()
-        if (cand.isEmpty()) {
-            val z = zonePoint(HERO_SPOTS[0], true)
-            heroPts.add(z)
-            return z
-        }
-        cand.sortBy { hypot((xOf(it) - centerX).toFloat(), (yOf(it) - centerY).toFloat()) }
-        var pick = cand[0]
-        for (minD in floatArrayOf(220f, 150f, 100f, 40f, 0f)) {
-            var found = -1
-            for (c in cand) {
-                var ok = true
-                for (u in used) if (dist(c, u) < minD) { ok = false; break }
-                if (ok) { found = c; break }
-            }
-            if (found >= 0) { pick = found; break }
-        }
-        val idx = pool.indexOf(pick)
-        if (idx >= 0) taken[idx] = true
-        used.add(pick)
-        heroPts.add(pick)
-        return pick
-    }
-
-    /** Sağ üst bölgedeki geçerli noktalar; daralırsa arama gevşetilir. */
-    private fun heroCandidates(): ArrayList<Int> {
-        var cand = sector { dx, dy -> dx > 50 && dy < -40 && -dy < 2.2f * dx }
-        if (cand.size < 4) cand = sector { dx, _ -> dx > 250 }
-        if (cand.size < 4) cand = sector { _, dy -> dy < -250 }
-        return cand
-    }
-
-    private inline fun sector(test: (Int, Int) -> Boolean): ArrayList<Int> {
-        val out = ArrayList<Int>()
-        for (p in pool) {
-            val dx = xOf(p) - centerX
-            val dy = yOf(p) - centerY
-            if (test(dx, dy)) out.add(p)
-        }
-        return out
-    }
-
     /** Büyü için üssün ortasında nokta (büyüler binaların üstüne bırakılabilir). */
     fun spellPoint(index: Int): Int = zonePoint(SPELL_SPOTS[index % SPELL_SPOTS.size], false)
 
     private val spellUsed = ArrayList<Int>(32)
-    private val heroPts = ArrayList<Int>(8)
 
     /** Büyü bölgesinden (üssün ortası) sıradaki nokta; aynı nokta iki kez seçilmez. */
     fun nextSpellPoint(): Int {
-        if (heroPts.isNotEmpty()) return nextSpellNearHeroes()
         for (attempt in 0 until 48) {
             val seed = spellUsed.size
             val p = if (seed < SPELL_SPOTS.size) spellPoint(seed) else spiralPoint(seed)
@@ -359,23 +328,6 @@ class Deployer(private val v: Vision) {
             if (attempt > 40) break
         }
         val p = spiralPoint(spellUsed.size + 1)
-        spellUsed.add(p)
-        return p
-    }
-
-    /** Büyüler kahramanların bırakıldığı bölgeye: kahraman noktalarının merkezi çevresinde sarmal. */
-    private fun nextSpellNearHeroes(): Int {
-        var sx = 0; var sy = 0
-        for (h in heroPts) { sx += xOf(h); sy += yOf(h) }
-        val cx = sx / heroPts.size
-        val cy = sy / heroPts.size
-        val seed = spellUsed.size
-        val r = if (seed == 0) 0f else 45f + 30f * kotlin.math.sqrt(seed.toFloat())
-        val a = seed * 2.39996
-        val p = pack(
-            (cx + (r * cos(a)).toInt()).coerceIn(X_MIN, X_MAX),
-            (cy + (r * sin(a)).toInt()).coerceIn(Y_MIN, Y_MAX)
-        )
         spellUsed.add(p)
         return p
     }

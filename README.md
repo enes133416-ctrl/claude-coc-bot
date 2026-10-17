@@ -1,7 +1,7 @@
 # CoC Bot (Android, derleme GitHub Actions'ta)
 
 Erişilebilirlik servisi ile Clash of Clans ekranını okuyup dokunuş gönderen bir bot.
-Sürüm **2.2** — saldırı öncesi otomatik uzaklaştırma (zoom-out), kalan askerleri tek tek köşelere bırakma, 85. saniyede otomatik teslim olma adımları otomatiktir.
+Sürüm **2.3** — saldırı öncesi otomatik zoom-out, 30. sn'de ekranı aşağı kaydırıp alt köşelere asker bırakma, kartları otomatik sınıflandırma (kahraman/büyü), kalan askerleri tek tek köşelere bırakma, 85. saniyede otomatik teslim.
 
 ## 1) Depoya yükleme ve APK indirme
 
@@ -43,16 +43,17 @@ Ganimet (altın + iksir) okunur. Toplam **1.6M**'nin altındaysa **İleri** ile 
    Her asker, kullanılan noktaların **en uzağına** bırakılır (min. 150 px, kırmızı çizginin dışında,
    bina/ağaç/su üstüne asla). Yani askerler birbirine yakın düşmez.
 1b. **Kalan askerler:** 4 grup bitince (≈40. sn) x40 kartının **sayacı okunur**; asker kalmışsa
-   (ör. 15) hepsi **tek tek, sırayla farklı köşelere** (sol üst → sağ üst → sol alt → sağ alt)
-   bırakılır. Köşeler her zaman düz çimdir; oyun dokunuşu reddetmez, sayaç güvenle düşer.
-2. **Kahramanlar:** 3 kahraman kartı sırayla basılıp **sağ üst** bölgeye bırakılır.
-3. **Büyüler:** herolardan sonra büyü kartları basılır ve **üssün ortasına (kral bölgesi)** atılır;
-   atış sayısı karttaki `xN` etiketinden okunur.
-4. **Yetenekler:** son kahraman bırakıldıktan **10 sn** sonra kahraman kartlarına tekrar basılır
-   (oyunda kart tekrar basılınca özellik/güç açılır).
-5. **Kalan kartlar:** x40 dahil bütün kartlar tekrar basılır; elde kalan askerler geçerli alanlara,
-   büyüler üs merkezine boşaltılır. Kart sayacı hâlâ dolu görünüyorsa ikinci tur yapılır —
-   yani geçersiz yere dokunulmuş olsa bile **hiç asker/büyü kartta kalmaz**.
+   (ör. 15) hepsi **tek tek, sırayla farklı köşelere** bırakılır. Köşe hedefleri kırmızı çizgi
+   kutusuna göre **dinamik** hesaplanır (4 kenar + 4 çapraz) — ekran kaydırılsa bile doğru yeri gösterir.
+2. **Kart sınıflandırma:** savaş başında her kartın sayacı okunur: **"xN" sayacı olan → büyü,
+   olmayan → kahraman.** Böylece ordu dizilimi değişse de doğru kartlar kullanılır.
+3. **Alt köşeler:** **30. sn'de ekran aşağı kaydırılır** (alt köşeler arayüzün arkasından görünür),
+   bırakma alanı yeniden taranır; sonraki asker ve kahramanlar da **alt bölgeye** bırakılır.
+4. **Kahramanlar:** güvenli **köşelere** bırakılır (sağ üst yerine — köşeler her zaman düz çimdir);
+   savaş sonunda bir kez daha denenir.
+5. **Büyüler:** üssün **ortasına (kral bölgesi)** atılır; atış sayısı karttaki `xN` etiketinden okunur.
+6. **Yetenekler:** son kahraman bırakıldıktan **10 sn** sonra kahraman kartlarına tekrar basılır.
+7. **Kalan kartlar:** x40 + kahramanlar köşelere, büyüler üs merkezine boşaltılır.
 
 ### Savaştan çıkış
 **70-85 sn arası:** kartlarda kalan son askerler (x40 ve ikinci asker kartı) **tek tek,

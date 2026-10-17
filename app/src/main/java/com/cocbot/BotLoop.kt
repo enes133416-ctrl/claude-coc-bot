@@ -14,14 +14,16 @@ import kotlinx.coroutines.delay
  * Keşifte ganimet 1.6M'nin altındaysa "İleri" ile yeni köy aranır, üstündeyse saldırı planı işler:
  *   0) ilk asker bırakılmadan önce ekran iki parmakla sıkıştırılarak (pinch) olabildiğince
  *      uzaklaştırılır; böylece büyük köyler de ekrana sığar, bırakma alanı bulunur
+ *   0b) kartlar sayaçlarından sınıflandırılır: "xN" sayacı olan → büyü, olmayan → kahraman
  *   1) x40 asker kartı: 10'ar asker, 10 sn arayla 4 grup (40 asker) ve hepsi birbirinden uzak noktalara
  *   1b) gruplar bitince (~40. sn) kartta asker kalmışsa (sayaçtan okunur) askerler tek tek,
  *       sırayla farklı köşelere bırakılır
- *   2) kahramanlar sağ üst bölgeye, büyüler üssün ortasına (kral bölgesi)
- *   3) kahramanlar bırakıldıktan 10 sn sonra kartlara tekrar dokunarak yetenekler
- *   4) elde kalan tüm kartlar (asker ve büyü) köşeler dahil geçerli noktalara boşaltılır
- *   5) 70-85 sn arası kartlarda kalan son askerler yine tek tek, sırayla farklı köşelere bırakılır
- *   6) 85. sn'de "Teslim Ol" → onayda "Tamam" → sonuçta "Eve Dön"
+ *   2) 30. sn'de ekran aşağı kaydırılır: köyün alt köşeleri görünür, sonraki askerler oraya bırakılır
+ *   3) kahramanlar güvenli köşelere, büyüler üssün ortasına (kral bölgesi)
+ *   4) kahramanlar bırakıldıktan 10 sn sonra kartlara tekrar dokunarak yetenekler
+ *   5) elde kalan tüm kartlar (x40 + kahraman + büyü) köşelere ve üs merkezine boşaltılır
+ *   6) 70-85 sn arası kartlarda kalan son askerler yine tek tek, sırayla farklı köşelere bırakılır
+ *   7) 85. sn'de "Teslim Ol" → onayda "Tamam" → sonuçta "Eve Dön"
  */
 class BotLoop(private val svc: BotService) {
 
@@ -45,6 +47,14 @@ class BotLoop(private val svc: BotService) {
         const val FLUSH_ROUNDS = 4           // sayaç hâlâ görünüyorsa tekrar sayısı
         const val FINAL_DROP_MS = 70_000L    // 70 sn sonra kalan askerler tek tek köşelere
         const val FINAL_GAP_MS = 450L        // son bırakmalar arası bekleme
+
+        // Aşağı kaydırma — 30. sn'de köyün alt köşeleri görünsün
+        const val PAN_DOWN_MS = 30_000L      // bu süreden sonra ekran aşağı kaydırılır
+        const val PAN_X = 1210f              // sürükleme ekseni (ekranın ortası)
+        const val PAN_Y_FROM = 1050f         // parmağın başlangıcı
+        const val PAN_Y_TO = 600f            // parmağın bitişi (yukarı sürükleme = görünüm aşağı iner)
+        const val PAN_DRAG_MS = 600L         // sürükleme süresi
+        const val PAN_SETTLE_MS = 900L       // kaydırma sonrası ekranın oturması
 
         // Uzaklaştırma (zoom-out) — saldırı öncesi
         const val ZOOM_PINCHES = 2           // sıkıştırma sayısı
@@ -76,10 +86,9 @@ class BotLoop(private val svc: BotService) {
         const val CARD_LBL_Y0 = 1288
         const val CARD_LBL_Y1 = 1330
 
-        const val SLOT_TOKENS = 0                     // x40 asker kartı
-        const val SLOT_TROOP2 = 1                     // ikinci asker kartı (x5)
-        val SLOT_HEROES = intArrayOf(2, 3, 4)         // kahraman kartları
-        val SLOT_SPELLS = intArrayOf(5, 6, 7, 8)      // büyü kartları
+        const val SLOT_TOKENS = 0                     // x40 asker kartı (tek asker türü)
+        // Diğer kartlar savaş başında sayaçlarından sınıflandırılır (classifySlots):
+        // "xN" sayacı olan slot → büyü, sayacı olmayan slot → kahraman
 
         const val SURRENDER_X = 152; const val SURRENDER_Y = 1193   // kırmızı Teslim Ol / Savaşı Bitir
         const val TAMAM_X = 1451; const val TAMAM_Y = 941           // onay ekranı yeşil Tamam
@@ -127,7 +136,14 @@ class BotLoop(private val svc: BotService) {
     private var zoomRetries = 0
     private var leftoverRounds = 0
     private var leftoverDropped = 0
-    private val spellCasts = IntArray(4)
+
+    // Aşağı kaydırma ve kart sınıflandırma durumu
+    private var pannedDown = false
+    private var slotsClassified = false
+    private var heroSlots = intArrayOf(2, 3, 4)      // savaş başında sınıflandırılır
+    private var spellSlots = intArrayOf(5, 6, 7, 8)  // savaş başında sınıflandırılır
+    private var spellCasts = IntArray(4)
+    private var finalHeroTried = false
     private val flushSlots = ArrayList<Int>()
     private val flushIsSpell = ArrayList<Boolean>()
 
@@ -291,7 +307,12 @@ class BotLoop(private val svc: BotService) {
         zoomRetries = 0
         leftoverRounds = 0
         leftoverDropped = 0
-        for (i in spellCasts.indices) spellCasts[i] = 0
+        pannedDown = false
+        slotsClassified = false
+        heroSlots = intArrayOf(2, 3, 4)
+        spellSlots = intArrayOf(5, 6, 7, 8)
+        spellCasts = IntArray(4)
+        finalHeroTried = false
         releaseMap()
     }
 
@@ -344,6 +365,15 @@ class BotLoop(private val svc: BotService) {
 
         // Saldırı öncesi ekran olabildiğince uzaklaştırılır (büyük köyler ekrana sığsın)
         if (!ensureZoomed(frame)) return
+
+        // Kartlar sınıflandırılır: sayacı (xN) olan → büyü, olmayan → kahraman
+        if (!slotsClassified) classifySlots(frame)
+
+        // 30 sn dolunca ekran aşağı kaydırılır: köyün alt köşeleri görünsün, oraya da asker bırakılsın
+        if (!pannedDown && attackStart > 0 && now - attackStart >= PAN_DOWN_MS) {
+            panDown(frame)
+            return
+        }
 
         val d = deployer
         if (d == null) {
@@ -434,6 +464,57 @@ class BotLoop(private val svc: BotService) {
         )
     }
 
+    /**
+     * Kartları sayaçlarından sınıflandırır: "xN" sayacı olan slotlar büyü,
+     * sayacı olmayanlar kahraman (boş slotlar da kahraman görünür; dokunmak zararsızdır).
+     * Orduda tek asker türü (x40) olduğu varsayılır.
+     */
+    private fun classifySlots(frame: Frame) {
+        val heroes = ArrayList<Int>()
+        val spells = ArrayList<Int>()
+        for (s in 1..9) {
+            val c = readCount(frame, s)
+            if (c != null && c > 0) spells.add(s) else heroes.add(s)
+        }
+        // tanıma tutarsızsa (hiç büyü ya da hiç kahraman çıkmadıysa) varsayılan düzene dön
+        if (heroes.isEmpty() || spells.isEmpty()) {
+            heroSlots = intArrayOf(2, 3, 4)
+            spellSlots = intArrayOf(5, 6, 7, 8)
+        } else {
+            heroSlots = heroes.toIntArray()
+            spellSlots = spells.toIntArray()
+        }
+        spellCasts = IntArray(spellSlots.size)
+        slotsClassified = true
+        svc.log("Kartlar: ${heroSlots.size} kahraman, ${spellSlots.size} büyü")
+    }
+
+    /**
+     * 30. sn: ekran aşağı kaydırılır (parmak yukarı sürüklenir) → köyün alt köşeleri
+     * görünür hale gelir. Görünüm değiştiği için bırakma alanı yeniden taranır;
+     * sonraki asker/kahraman bırakmaları dinamik köşeler sayesinde alt bölgeye gider.
+     */
+    private suspend fun panDown(frame: Frame) {
+        pannedDown = true
+        svc.log("Ekran aşağı kaydırılıyor (alt köşelere asker bırakılacak)")
+        // seçili kart varsa bırak (sürüklemeye asker sıkıştırmasın)
+        tapCard(frame, SLOT_TOKENS)
+        delay(200)
+        swipeRef(frame, PAN_X, PAN_Y_FROM, PAN_X, PAN_Y_TO, PAN_DRAG_MS)
+        releaseMap()          // görünüm değişti: alan yeniden taranacak
+        battleScanned = false
+        delay(PAN_SETTLE_MS)
+    }
+
+    /** Referans koordinatta dikey sürükleme: (x, yFrom) → (x, yTo). */
+    private suspend fun swipeRef(frame: Frame, xRef: Float, yFromRef: Float, yToRef: Float, durationMs: Long) {
+        val from = PointF()
+        val to = PointF()
+        Ref.map(xRef, yFromRef, frame.w, frame.h, from)
+        Ref.map(xRef, yToRef, frame.w, frame.h, to)
+        svc.swipe(from.x, from.y, to.x, to.y, durationMs)
+    }
+
     /** 1) x40 kartından 10'ar asker, 10 sn arayla 4 grup; hepsi ayrı noktalara. */
     private suspend fun tokenPhase(frame: Frame, elapsed0: Long) {
         val d = deployer ?: return
@@ -512,38 +593,38 @@ class BotLoop(private val svc: BotService) {
         svc.log("Kalan askerler: $placedNow bırakıldı (kartta ~${cnt ?: target})")
     }
 
-    /** 2) Kahramanlar sağ üst bölgeye. */
+    /** 3) Kahramanlar güvenli köşelere bırakılır (köşeler her zaman düz çimdir). */
     private suspend fun heroPhase(frame: Frame) {
         val d = deployer ?: return
-        if (heroIndex >= SLOT_HEROES.size) {
+        if (heroIndex >= heroSlots.size) {
             phase = Phase.SPELLS
             spellIndex = 0
             return
         }
-        val slot = SLOT_HEROES[heroIndex]
+        val slot = heroSlots[heroIndex]
         tapCard(frame, slot)
         delay(150)
-        place(frame, { d.heroPoint(heroIndex) })
+        place(frame, { _ -> d.cornerNext() })
         heroIndex++
         heroDeployAt = SystemClock.elapsedRealtime()   // yetenek sayacı SON kahramandan başlar
-        svc.log("Kahraman $heroIndex → sağ üst")
-        if (heroIndex >= SLOT_HEROES.size) {
+        svc.log("Kahraman $heroIndex → köşe")
+        if (heroIndex >= heroSlots.size) {
             phase = Phase.SPELLS
             spellIndex = 0
         }
     }
 
-    /** 3) Büyüler üssün ortasına (kral bölgesi); kart adedi kadar atış. */
+    /** 3b) Büyüler üssün ortasına (kral bölgesi); kart adedi kadar atış. */
     private suspend fun spellPhase(frame: Frame) {
         val d = deployer ?: return
-        if (spellIndex >= SLOT_SPELLS.size) {
+        if (spellIndex >= spellSlots.size) {
             phase = Phase.ABILITY
             abilityIndex = 0
             return
         }
-        val slot = SLOT_SPELLS[spellIndex]
+        val slot = spellSlots[spellIndex]
         if (spellCasts[spellIndex] == 0) {
-            spellCasts[spellIndex] = (readCount(frame, slot) ?: 3).coerceIn(1, 8)
+            spellCasts[spellIndex] = (readCount(frame, slot) ?: 1).coerceIn(1, 8)
             svc.log("Büyü ${spellIndex + 1}: ${spellCasts[spellIndex]} atış")
         }
         for (k in 0 until spellCasts[spellIndex]) {
@@ -554,7 +635,7 @@ class BotLoop(private val svc: BotService) {
             delay(TAP_GAP_MS)
         }
         spellIndex++
-        if (spellIndex >= SLOT_SPELLS.size) {
+        if (spellIndex >= spellSlots.size) {
             phase = Phase.ABILITY
             abilityIndex = 0
         }
@@ -567,33 +648,36 @@ class BotLoop(private val svc: BotService) {
             delay(150)
             return
         }
-        if (abilityIndex >= SLOT_HEROES.size) {
+        if (abilityIndex >= heroSlots.size) {
             buildFlush(frame)
             phase = Phase.FLUSH
             return
         }
-        tapCard(frame, SLOT_HEROES[abilityIndex])
+        tapCard(frame, heroSlots[abilityIndex])
         abilityIndex++
         svc.log("Kahraman yeteneği $abilityIndex")
         delay(600)
     }
 
-    /** 5) Elde kalan kartlar: askerler geçerli zemine, büyüler üs merkezine boşaltılır. */
+    /** 5) Elde kalan kartlar: x40 ve kahramanlar köşelere, büyüler üs merkezine boşaltılır. */
     private fun buildFlush(frame: Frame) {
         flushSlots.clear()
         flushIsSpell.clear()
         // x40 kartı her zaman denenir: geçersiz yere dokunulduğu için içeride asker kalmış olabilir
         flushSlots.add(SLOT_TOKENS)
         flushIsSpell.add(false)
-        flushSlots.add(SLOT_TROOP2)
-        flushIsSpell.add(false)
-        for (s in SLOT_SPELLS) {
+        // bırakılamamış kahramanlar: kart + köşe dokunuşuyla tekrar denenir (boşsa zararsız)
+        for (s in heroSlots) {
+            flushSlots.add(s)
+            flushIsSpell.add(false)
+        }
+        for (s in spellSlots) {
             flushSlots.add(s)
             flushIsSpell.add(true)
         }
         flushIndex = 0
         flushRound = 0
-        svc.log("Kalan kartlar boşaltılıyor (x40 dahil)")
+        svc.log("Kalan kartlar boşaltılıyor (x40 + kahramanlar dahil)")
     }
 
     private suspend fun flushPhase(frame: Frame) {
@@ -652,35 +736,35 @@ class BotLoop(private val svc: BotService) {
     }
 
     /**
-     * 5) 70-85 sn arası: kartlarda kalan son askerler TEK TEK ve sırayla farklı
-     * köşelere bırakılır (her karede bir asker). Sayaç okunamadıysa yine de
-     * denenir — boş kartla dokunmak oyun için zararsızdır. 85 sn dolunca
-     * teslim olunur (bkz. [BATTLE_LIMIT_MS]).
+     * 6) 70-85 sn arası: kartlarda kalan son askerler TEK TEK ve sırayla farklı
+     * köşelere bırakılır (her karede bir asker). Önce kahraman kartları bir kez
+     * daha denenir (bırakılmamışsa düşer, bırakılmışsa dokunmak zararsızdır).
+     * x40 sayacı okunamadıysa yine de denenir. 85 sn dolunca teslim olunur.
      */
     private suspend fun finalPhase(frame: Frame) {
         val d = deployer ?: return
+        if (!finalHeroTried) {
+            finalHeroTried = true
+            for (s in heroSlots) {
+                if (!svc.running) return
+                tapCard(frame, s)
+                delay(120)
+                place(frame, { _ -> d.cornerNext() })
+                delay(250)
+            }
+            return
+        }
         val tTokens = readCount(frame, SLOT_TOKENS)
-        val tTroop2 = readCount(frame, SLOT_TROOP2)
         // null = sayaç okunamadı: kart boş olabilir ama asker kalmış da olabilir → yine de dene
-        val useTokens = tTokens == null || tTokens > 0
-        val useTroop2 = tTroop2 == null || tTroop2 > 0
-        if (!useTokens && !useTroop2) {
+        if (tTokens != null && tTokens <= 0) {
             svc.log("Kartlar boş, 85 sn'de teslim")
             delay(300)
             return
         }
-        if (useTokens) {
-            tapCard(frame, SLOT_TOKENS)
-            delay(120)
-            place(frame, { _ -> d.cornerNext() })
-            delay(FINAL_GAP_MS)
-        }
-        if (useTroop2 && svc.running) {
-            tapCard(frame, SLOT_TROOP2)
-            delay(120)
-            place(frame, { _ -> d.cornerNext() })
-            delay(FINAL_GAP_MS)
-        }
+        tapCard(frame, SLOT_TOKENS)
+        delay(120)
+        place(frame, { _ -> d.cornerNext() })
+        delay(FINAL_GAP_MS)
     }
 
     // ------------------------------------------------------------- teslim
