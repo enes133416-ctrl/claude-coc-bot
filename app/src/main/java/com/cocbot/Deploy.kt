@@ -73,6 +73,8 @@ class Deployer(private val v: Vision) {
     private val taken = ArrayList<Boolean>(4096)
     private val score = ArrayList<Int>(4096)
     private val used = ArrayList<Int>(128)
+    /** Her havuz noktasının kullanılan noktalara en kısa uzaklığı (artımlı güncellenir). */
+    private var distArr = FloatArray(0)
     private val rgb = IntArray(3)
 
     private var hasLine = false
@@ -157,6 +159,24 @@ class Deployer(private val v: Vision) {
         pool.clear(); pool.addAll(np)
         taken.clear(); taken.addAll(nt)
         score.clear(); score.addAll(ns)
+        rebuildDist()
+    }
+
+    /** distArr'ı kullanılan noktalara göre sıfırdan kurar. */
+    private fun rebuildDist() {
+        distArr = FloatArray(pool.size)
+        if (used.isEmpty()) {
+            java.util.Arrays.fill(distArr, Float.MAX_VALUE)
+            return
+        }
+        for (i in pool.indices) {
+            var d = Float.MAX_VALUE
+            for (u in used) {
+                val dd = dist(pool[i], u)
+                if (dd < d) d = dd
+            }
+            distArr[i] = d
+        }
     }
 
     private fun reset() {
@@ -205,8 +225,16 @@ class Deployer(private val v: Vision) {
         }
         if (bi < 0) return -1
         taken[bi] = true
-        used.add(pool[bi])
-        return pool[bi]
+        val p0 = pool[bi]
+        used.add(p0)
+        val px0 = xOf(p0)
+        val py0 = yOf(p0)
+        for (i in pool.indices) {
+            if (taken[i]) continue
+            val dd = hypot((xOf(pool[i]) - px0).toFloat(), (yOf(pool[i]) - py0).toFloat())
+            if (dd < distArr[i]) distArr[i] = dd
+        }
+        return p0
     }
 
     /**
@@ -218,22 +246,26 @@ class Deployer(private val v: Vision) {
         var bestD = -1f
         for (i in pool.indices) {
             if (taken[i]) continue
-            val p = pool[i]
-            var d = Float.MAX_VALUE
-            for (u in used) {
-                val dd = dist(p, u)
-                if (dd < d) d = dd
-                if (d <= bestD) break
-            }
+            val d = distArr[i]
             if (d > bestD) {
                 bestD = d
                 bi = i
+                if (bestD == Float.MAX_VALUE) break
             }
         }
         if (bi < 0 || bestD < minDist) return -1
         taken[bi] = true
-        used.add(pool[bi])
-        return pool[bi]
+        val p = pool[bi]
+        used.add(p)
+        // artımlı güncelleme: yeni noktaya olan uzaklık her aday için tek sefer hesaplanır
+        val px = xOf(p)
+        val py = yOf(p)
+        for (i in pool.indices) {
+            if (taken[i]) continue
+            val dd = hypot((xOf(pool[i]) - px).toFloat(), (yOf(pool[i]) - py).toFloat())
+            if (dd < distArr[i]) distArr[i] = dd
+        }
+        return p
     }
 
     /** Boşaltma için: mesafe kuralını kademeli gevşeterek nokta arar. */
@@ -245,6 +277,7 @@ class Deployer(private val v: Vision) {
         // Havuz tükendiyse hiçbir zaman -1 dönme: noktaları serbest bırak, en uzağı seç
         if (pool.isEmpty()) return -1
         for (i in taken.indices) taken[i] = false
+        rebuildDist()
         val p = pick(0f)
         if (p >= 0) return p
         return pool[0]
@@ -393,6 +426,7 @@ class Deployer(private val v: Vision) {
     /** Kullanılan noktaları devralır (yeniden tarama sonrası aynı noktalara bırakılmaz). */
     fun usePoints(pts: IntArray) {
         for (p in pts) if (!used.contains(p)) used.add(p)
+        rebuildDist()
     }
 
     private fun pack(x: Int, y: Int): Int = (x shl 16) or (y and 0xFFFF)

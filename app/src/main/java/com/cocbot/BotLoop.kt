@@ -39,6 +39,7 @@ class BotLoop(private val svc: BotService) {
         const val CARD_REFRESH = 2           // kartın toplam dokunulma sayısı (ilk + 1 tazeleme)
         const val SCENE_CHECK_MS = 1_500L    // bırakma sırasında sahne kontrolü
         const val KING_FLUSH_ROUNDS = 6      // kraldan sonra kalan tazı için tur sayısı
+        const val KING_WAIT_MAX_MS = 60_000L // kral, savaş başlaması için en fazla bu kadar bekler
         const val ZOOM_PINCHES = 2           // uzaklaştırma kıstırması sayısı
         const val ZOOM_WAIT_MS = 600L        // kıstırmadan sonra kameranın oturması
         const val NATURAL_LIMIT_MS = 210_000L // savaş kendiliğinden bitmezse dur (teslim YOK)
@@ -47,13 +48,13 @@ class BotLoop(private val svc: BotService) {
         val CARD_X = intArrayOf(326, 528, 704, 874, 1043, 1232, 1401, 1571, 1740, 1900)
         const val CARD_TAP_Y = 1382
         val CARD_LBL_X = arrayOf(
-            intArrayOf(258, 398), intArrayOf(460, 600), intArrayOf(636, 776),
-            intArrayOf(807, 946), intArrayOf(976, 1114), intArrayOf(1165, 1304),
-            intArrayOf(1334, 1473), intArrayOf(1504, 1643), intArrayOf(1673, 1812),
-            intArrayOf(1838, 1990)
+            intArrayOf(250, 405), intArrayOf(440, 610), intArrayOf(620, 785),
+            intArrayOf(795, 955), intArrayOf(965, 1120), intArrayOf(1155, 1310),
+            intArrayOf(1325, 1480), intArrayOf(1495, 1650), intArrayOf(1665, 1820),
+            intArrayOf(1835, 2000)
         )
-        const val CARD_LBL_Y0 = 1288
-        const val CARD_LBL_Y1 = 1330
+        const val CARD_LBL_Y0 = 1255
+        const val CARD_LBL_Y1 = 1345
 
         const val SLOT_HOUNDS = 0            // x50 tazı kartı
         const val SLOT_KING = 1              // kral kartı
@@ -85,11 +86,12 @@ class BotLoop(private val svc: BotService) {
     private var attackStart = 0L
     private var firstDeployAt = 0L
     private var houndStartAt = 0L
+    private var houndWindows = 0
     private var houndTaps = 0
     private var cardTaps = 0
     private var cardKeepAt = 0L
     private var sceneCheckAt = 0L
-    private var kingFlushRound = 0
+    private var kingWaitAt = 0L
     private var battleScanned = false
     private var scanTries = 0
 
@@ -220,11 +222,12 @@ class BotLoop(private val svc: BotService) {
         attackStart = if (now > 0) now else SystemClock.elapsedRealtime()
         firstDeployAt = 0L
         houndStartAt = 0L
+        houndWindows = 0
         houndTaps = 0
         cardTaps = 0
         cardKeepAt = 0L
         sceneCheckAt = 0L
-        kingFlushRound = 0
+        kingWaitAt = 0L
         battleScanned = false
         scanTries = 0
         releaseMap()
@@ -297,8 +300,18 @@ class BotLoop(private val svc: BotService) {
         when (phase) {
             Phase.ZOOM -> zoomPhase(frame)
             Phase.HOUNDS -> houndPhase(frame)
-            Phase.KING -> kingPhase(frame)
+            Phase.KING -> kingPhase(frame, battleScene)
             Phase.WAIT -> {
+                // Savaş gerçekten başladıysa ve kartta hâlâ tazı varsa (sayaç > 0)
+                // bir 15 sn'lik pencere daha aç: hazırlık ekranında yapılan dokunuşlar boşa gitmiş olabilir.
+                val left = readCount(frame, SLOT_HOUNDS) ?: 0
+                if (battleScene && left > 0 && houndWindows < 2) {
+                    houndWindows++
+                    svc.log("Kartta $left tazı kaldı → 15 sn daha bırakılıyor")
+                    houndStartAt = 0L
+                    phase = Phase.HOUNDS
+                    return
+                }
                 val ref = if (firstDeployAt > 0) firstDeployAt else attackStart
                 if (now - ref > NATURAL_LIMIT_MS) {
                     svc.stopWithWarning("⚠ Savaş kendiliğinden bitmedi, durdu")
@@ -336,9 +349,11 @@ class BotLoop(private val svc: BotService) {
     private suspend fun houndPhase(frame: Frame) {
         if (houndStartAt == 0L) {
             houndStartAt = SystemClock.elapsedRealtime()
+            if (houndWindows == 0) houndWindows = 1
             cardKeepAt = 0L
             cardTaps = 0
             sceneCheckAt = 0L
+            svc.log("Tazı penceresi ${houndWindows}/2 başladı")
         }
         while (true) {
             if (!svc.running) return
@@ -375,24 +390,36 @@ class BotLoop(private val svc: BotService) {
         phase = Phase.KING
     }
 
-    /** Kralı sağ üst/ön cepheye bırakır; ardından kartta tazı kaldıysa boşaltır. */
-    private suspend fun kingPhase(frame: Frame) {
+    /**
+     * Kralı sağ üst/ön cepheye bırakır.
+     * Savaş henüz başlamadıysa (hazırlık geri sayımı) kral boşa gitmesin diye beklenir;
+     * en fazla [KING_WAIT_MAX_MS] beklenir. Ardından kartta tazı kaldıysa boşaltılır.
+     */
+    private suspend fun kingPhase(frame: Frame, battleScene: Boolean) {
         val d = deployer
-        if (d != null) {
-            tapCard(frame, SLOT_KING)
-            delay(180)
-            val p = d.heroPoint(0)
-            if (p >= 0) tapPoint(frame, p) else tapRef(frame, 1620f, 470f)
-            if (firstDeployAt == 0L) firstDeployAt = SystemClock.elapsedRealtime()
-            svc.log("Kral bırakıldı → savaşın bitmesi bekleniyor")
-        } else {
+        if (d == null) {
             svc.log("Kral: alan hazır değil, sonra denenecek")
             return
         }
+        if (!battleScene) {
+            if (kingWaitAt == 0L) kingWaitAt = SystemClock.elapsedRealtime()
+            val waited = SystemClock.elapsedRealtime() - kingWaitAt
+            if (waited < KING_WAIT_MAX_MS) {
+                svc.log("Kral için savaşın başlaması bekleniyor (${waited / 1000} sn)")
+                delay(300)
+                return
+            }
+        }
+        tapCard(frame, SLOT_KING)
+        delay(180)
+        val p = d.heroPoint(0)
+        if (p >= 0) tapPoint(frame, p) else tapRef(frame, 1620f, 470f)
+        if (firstDeployAt == 0L) firstDeployAt = SystemClock.elapsedRealtime()
+        svc.log("Kral bırakıldı → savaşın bitmesi bekleniyor")
 
-        // Elde tazı kaldıysa: kart sayacı hâlâ dolu görünüyorsa kısa boşaltma turu
+        // Elde tazı kaldıysa ve savaş sürüyorsa: kart sayacı hâlâ dolu görünüyorsa kısa boşaltma turu
         var round = 0
-        while (round < KING_FLUSH_ROUNDS && svc.running) {
+        while (battleScene && round < KING_FLUSH_ROUNDS && svc.running) {
             val fresh = svc.grab()
             val left = if (fresh != null) {
                 try { flushCountLeft(fresh, SLOT_HOUNDS) } finally { fresh.recycle() }
