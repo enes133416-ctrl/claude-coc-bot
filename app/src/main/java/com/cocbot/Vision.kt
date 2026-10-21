@@ -180,6 +180,10 @@ class Vision(private val bmp: Bitmap) {
             y += 6
         }
         if (maxX < 0 || bestW < 60) return null
+        // Sağlık kontrolü: gerçek bırakma çizgisi ekranın tamamını kaplamaz.
+        // (Hazırlık ekranındaki kırmızı süsler/çalılar çizgi sanılmasın.)
+        if (maxX - minX > 2170 || maxY - minY > 1400) return null
+        if (minX < 60 && maxX > 2330) return null
         val y1 = maxOf(maxY, 2 * cy - minY)
         return intArrayOf(minX, minY, maxX, y1, cx, cy)
     }
