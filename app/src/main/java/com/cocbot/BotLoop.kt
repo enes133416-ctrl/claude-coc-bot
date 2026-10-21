@@ -39,6 +39,7 @@ class BotLoop(private val svc: BotService) {
         const val CARD_REFRESH = 2           // kartın toplam dokunulma sayısı (ilk + 1 tazeleme)
         const val SCENE_CHECK_MS = 1_500L    // bırakma sırasında sahne kontrolü
         const val KING_FLUSH_ROUNDS = 6      // kraldan sonra kalan tazı için tur sayısı
+        const val WAIT_CHECK_MS = 2_500L     // savaş beklerken kart sayacı okuma aralığı
         const val KING_WAIT_MAX_MS = 60_000L // kral, savaş başlaması için en fazla bu kadar bekler
         const val ZOOM_PINCHES = 2           // uzaklaştırma kıstırması sayısı
         const val ZOOM_WAIT_MS = 600L        // kıstırmadan sonra kameranın oturması
@@ -73,6 +74,7 @@ class BotLoop(private val svc: BotService) {
     private var lastTapAt = 0L
     private var attempts = 0
     private var unknownSince = 0L
+    private var confirmLogAt = 0L
 
     // Keşif durumu
     private var pending: Pair<Long, Long>? = null
@@ -87,6 +89,8 @@ class BotLoop(private val svc: BotService) {
     private var firstDeployAt = 0L
     private var houndStartAt = 0L
     private var houndWindows = 0
+    private var flushTries = 0
+    private var waitCheckAt = 0L
     private var houndTaps = 0
     private var cardTaps = 0
     private var cardKeepAt = 0L
@@ -165,7 +169,10 @@ class BotLoop(private val svc: BotService) {
             }
             Scene.SURRENDER_CONFIRM ->
                 // Teslim olunmuyor: bu ekran beklenmiyor, karışmıyoruz (İptal'e de basmıyoruz).
-                svc.log("Onay ekranı (bot beklemiyor, dokunulmuyor)")
+                if (now - confirmLogAt > 5000L) {
+                    confirmLogAt = now
+                    svc.log("Onay ekranı (bot beklemiyor, dokunulmuyor)")
+                }
         }
     }
 
@@ -223,6 +230,8 @@ class BotLoop(private val svc: BotService) {
         firstDeployAt = 0L
         houndStartAt = 0L
         houndWindows = 0
+        flushTries = 0
+        waitCheckAt = 0L
         houndTaps = 0
         cardTaps = 0
         cardKeepAt = 0L
@@ -302,22 +311,38 @@ class BotLoop(private val svc: BotService) {
             Phase.HOUNDS -> houndPhase(frame)
             Phase.KING -> kingPhase(frame, battleScene)
             Phase.WAIT -> {
-                // Savaş gerçekten başladıysa ve kartta hâlâ tazı varsa (sayaç > 0)
-                // bir 15 sn'lik pencere daha aç: hazırlık ekranında yapılan dokunuşlar boşa gitmiş olabilir.
-                val left = readCount(frame, SLOT_HOUNDS) ?: 0
-                if (battleScene && left > 0 && houndWindows < 2) {
-                    houndWindows++
-                    svc.log("Kartta $left tazı kaldı → 15 sn daha bırakılıyor")
-                    houndStartAt = 0L
-                    phase = Phase.HOUNDS
-                    return
+                // Kart sayacı seyrek okunur (OCR pahalı): savaş sürerken tazı kaldıysa
+                // ya bir 15 sn'lik pencere daha açılır ya da kısa boşaltma yapılır.
+                if (battleScene && now - waitCheckAt >= WAIT_CHECK_MS) {
+                    waitCheckAt = now
+                    val left = readCount(frame, SLOT_HOUNDS) ?: 0
+                    if (left > 0 && houndWindows < 2) {
+                        houndWindows++
+                        svc.log("Kartta $left tazı kaldı → 15 sn daha bırakılıyor")
+                        houndStartAt = 0L
+                        phase = Phase.HOUNDS
+                        return
+                    }
+                    if (left > 0 && flushTries < 3) {
+                        flushTries++
+                        svc.log("Kartta $left tazı kaldı → boşaltma $flushTries/3")
+                        tapCard(frame, SLOT_HOUNDS)
+                        delay(100)
+                        repeat(5) {
+                            val n = deployBurst(frame, HOUNDS_PER_BURST)
+                            if (n > 0) houndTaps += n
+                            delay(110)
+                        }
+                        return
+                    }
+                    if (left == 0) svc.log("Tazı kartı boş")
                 }
                 val ref = if (firstDeployAt > 0) firstDeployAt else attackStart
                 if (now - ref > NATURAL_LIMIT_MS) {
                     svc.stopWithWarning("⚠ Savaş kendiliğinden bitmedi, durdu")
                 } else {
                     svc.log("Savaş sürüyor… ${(now - ref) / 1000} sn")
-                    delay(200)
+                    delay(400)
                 }
             }
         }
