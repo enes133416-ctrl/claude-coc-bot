@@ -11,37 +11,41 @@ import kotlinx.coroutines.delay
  *
  * Köy → Savaş menüsü → Ordu → rakip önizleme → savaş → sonuç → köy
  *
- * Keşifte ganimet 3M'nin altındaysa "İleri" ile yeni köy aranır, üstündeyse saldırı planı işler:
- *   1) x40 asker kartı: 10'ar asker, 10 sn arayla 4 grup (40 asker) ve hepsi birbirinden uzak noktalara
- *   2) kahramanlar sağ üst bölgeye, büyüler üssün ortasına (kral bölgesi)
- *   3) kahramanlar bırakıldıktan 10 sn sonra kartlara tekrar dokunarak yetenekler
- *   4) elde kalan tüm kartlar (asker ve büyü) geçerli noktalara boşaltılır
- *   5) savaş başlangıcından 70 sn sonra "Teslim Ol" → onayda "Tamam" → sonuçta "Eve Dön"
+ * v3 saldırı planı (50 tazı + kral):
+ *   0) Ganimet (altın + iksir) 1.000.000'u geçmiyorsa "İleri" ile yeni köy aranır.
+ *   1) Geçtiyse: ekran iki parmakla UZAKLAŞTIRILIR (pinch-in), harita yeniden taranır.
+ *   2) Tazı kartına bir kez basılır ve 15 sn boyunca durmadan, HER SEFERİNDE AYNI ANDA
+ *      3 ayrı geçerli noktaya 3 tazı bırakılır (tek jestte üç parmak).
+ *   3) 15 sn dolunca kral kartına basılır ve sağ üst/ön cepheye bırakılır.
+ *   4) Elde tazı kaldıysa kısa bir boşaltma turu daha yapılır (kart boş kalmasın).
+ *   5) TESLİM OLUNMAZ: savaş kendiliğinden bitene kadar beklenir, sonuç ekranında "Eve Dön".
  */
 class BotLoop(private val svc: BotService) {
 
     companion object {
         const val WAIT_MS = 2000L            // dokunuş sonrası ekran değişimi bekleme üst sınırı
         const val MAX_ATTEMPTS = 3           // aynı sahnede art arda en fazla deneme
-        const val RETREAT_ATTEMPTS = 8       // teslim ol / Tamam / Eve Dön için deneme sayısı
-        const val LOOT_LIMIT = 3_000_000L    // altın + iksir bunu geçerse saldır
-        const val TAP_GAP_MS = 220L          // bırakma dokunuşları arası bekleme
+        const val RETREAT_ATTEMPTS = 8       // Eve Dön için deneme sayısı
+        const val LOOT_LIMIT = 1_000_000L    // altın + iksir bunu GEÇERSE saldır
+        const val TAP_GAP_MS = 90L           // bırakma dokunuşları arası bekleme
         const val UNKNOWN_WARN_MS = 30_000L
         const val BATTLE_WARN_MS = 240_000L
 
-        // Saldırı planı
-        const val TOKEN_GROUPS = 4           // x40 kartı → 4 grup
-        const val TOKEN_PER_GROUP = 10       // her grupta 10 asker
-        const val GROUP_DELAY_MS = 10_000L   // gruplar arası 10 sn
-        const val HERO_ABILITY_DELAY_MS = 10_000L
-        const val BATTLE_LIMIT_MS = 70_000L  // 70 sn sonra teslim ol
-        const val BATTLE_HARD_LIMIT_MS = 95_000L
-        const val FLUSH_TAPS = 4             // kart başına boşaltma dokunuşu
-        const val FLUSH_ROUNDS = 4           // sayaç hâlâ görünüyorsa tekrar sayısı
+        // --- v3 saldırı planı ---
+        const val HOUND_MS = 15_000L         // tazı bırakma penceresi (15 sn)
+        const val HOUNDS_PER_BURST = 3       // her seferinde AYNI ANDA 3 noktaya 3 tazı
+        const val BURST_GAP_MS = 60L         // iki üçlü bırakma arası
+        const val CARD_KEEP_MS = 2_500L      // kart seçimini tazeleme aralığı
+        const val CARD_REFRESH = 2           // kartın toplam dokunulma sayısı (ilk + 1 tazeleme)
+        const val SCENE_CHECK_MS = 1_500L    // bırakma sırasında sahne kontrolü
+        const val KING_FLUSH_ROUNDS = 6      // kraldan sonra kalan tazı için tur sayısı
+        const val ZOOM_PINCHES = 2           // uzaklaştırma kıstırması sayısı
+        const val ZOOM_WAIT_MS = 600L        // kıstırmadan sonra kameranın oturması
+        const val NATURAL_LIMIT_MS = 210_000L // savaş kendiliğinden bitmezse dur (teslim YOK)
 
         // Kart yuvaları (0 tabanlı) — referans 2419x1512
         val CARD_X = intArrayOf(326, 528, 704, 874, 1043, 1232, 1401, 1571, 1740, 1900)
-        const val CARD_TAP_Y = 1332
+        const val CARD_TAP_Y = 1382
         val CARD_LBL_X = arrayOf(
             intArrayOf(258, 398), intArrayOf(460, 600), intArrayOf(636, 776),
             intArrayOf(807, 946), intArrayOf(976, 1114), intArrayOf(1165, 1304),
@@ -51,18 +55,16 @@ class BotLoop(private val svc: BotService) {
         const val CARD_LBL_Y0 = 1288
         const val CARD_LBL_Y1 = 1330
 
-        const val SLOT_TOKENS = 0                     // x40 asker kartı
-        const val SLOT_TROOP2 = 1                     // ikinci asker kartı (x5)
-        val SLOT_HEROES = intArrayOf(2, 3, 4)         // kahraman kartları
-        val SLOT_SPELLS = intArrayOf(5, 6, 7, 8)      // büyü kartları
+        const val SLOT_HOUNDS = 0            // x50 tazı kartı
+        const val SLOT_KING = 1              // kral kartı
 
-        const val SURRENDER_X = 152; const val SURRENDER_Y = 1193   // kırmızı Teslim Ol / Savaşı Bitir
+        const val SURRENDER_X = 152; const val SURRENDER_Y = 1193   // kırmızı Savaşı Bitir / Teslim Ol
         const val TAMAM_X = 1451; const val TAMAM_Y = 941           // onay ekranı yeşil Tamam
         const val EVE_DON_X = 1211; const val EVE_DON_Y = 1308      // sonuç ekranı Eve Dön
     }
 
-    private enum class Stage { SCOUT, ATTACK, RETREAT }
-    private enum class Phase { TOKENS, HEROES, SPELLS, ABILITY, FLUSH, WAIT }
+    private enum class Stage { SCOUT, ATTACK }
+    private enum class Phase { ZOOM, HOUNDS, KING, WAIT }
 
     private val pt = PointF()
 
@@ -79,24 +81,17 @@ class BotLoop(private val svc: BotService) {
 
     // Savaş planı durumu
     private var stage = Stage.SCOUT
-    private var phase = Phase.TOKENS
+    private var phase = Phase.ZOOM
     private var attackStart = 0L
-    private var heroDeployAt = 0L
-    private var lastGroupEndAt = 0L
-    private var groupCount = 0
-    private var tokenPlaced = 0
-    private var heroIndex = 0
-    private var spellIndex = 0
-    private var abilityIndex = 0
-    private var flushIndex = 0
-    private var flushRound = 0
-    private var spellSeed = 0
+    private var firstDeployAt = 0L
+    private var houndStartAt = 0L
+    private var houndTaps = 0
+    private var cardTaps = 0
+    private var cardKeepAt = 0L
+    private var sceneCheckAt = 0L
+    private var kingFlushRound = 0
     private var battleScanned = false
     private var scanTries = 0
-    private var retreatAt = 0L
-    private val spellCasts = IntArray(4)
-    private val flushSlots = ArrayList<Int>()
-    private val flushIsSpell = ArrayList<Boolean>()
 
     private var mapBmp: Bitmap? = null
     private var deployer: Deployer? = null
@@ -131,15 +126,6 @@ class BotLoop(private val svc: BotService) {
     private suspend fun handle(frame: Frame, scene: Scene?) {
         val now = SystemClock.elapsedRealtime()
 
-        // Saldırı planı çok uzadıysa (sahne tanınamasa bile) yine de teslim olunur
-        if (stage == Stage.ATTACK && attackStart > 0 && now - attackStart >= BATTLE_HARD_LIMIT_MS &&
-            (scene == null || scene == Scene.ATTACK_PREP || scene == Scene.ATTACK_BATTLE || scene == Scene.SURRENDER_CONFIRM)
-        ) {
-            svc.log("⚠ Süre aşıldı, teslim olunuyor")
-            startRetreat(frame, now)
-            return
-        }
-
         if (scene == null) {
             if (unknownSince == 0L) unknownSince = now
             val limit = if (stage == Stage.ATTACK) BATTLE_WARN_MS else UNKNOWN_WARN_MS
@@ -164,12 +150,10 @@ class BotLoop(private val svc: BotService) {
                 act(frame, scene, now, "Eve Dön", RETREAT_ATTEMPTS) { tapRef(frame, EVE_DON_X.toFloat(), EVE_DON_Y.toFloat()) }
             }
             Scene.ATTACK_PREP -> when (stage) {
-                Stage.RETREAT -> retreat(frame, scene, now)
                 Stage.ATTACK -> battle(frame, scene, now)
                 else -> scout(frame, now)
             }
             Scene.ATTACK_BATTLE -> when (stage) {
-                Stage.RETREAT -> retreat(frame, scene, now)
                 Stage.ATTACK -> battle(frame, scene, now)
                 else -> {
                     svc.log("Savaş ortasında başlatıldı, plan devreye giriyor")
@@ -177,13 +161,9 @@ class BotLoop(private val svc: BotService) {
                     battle(frame, scene, now)
                 }
             }
-            Scene.SURRENDER_CONFIRM -> when (stage) {
-                Stage.RETREAT -> retreat(frame, scene, now)
-                Stage.ATTACK -> act(frame, scene, now, "Tamam (savaşı başlat)", RETREAT_ATTEMPTS) {
-                    tapRef(frame, TAMAM_X.toFloat(), TAMAM_Y.toFloat())
-                }
-                else -> svc.log("Onay ekranı (bot beklemiyor, dokunulmuyor)")
-            }
+            Scene.SURRENDER_CONFIRM ->
+                // Teslim olunmuyor: bu ekran beklenmiyor, karışmıyoruz (İptal'e de basmıyoruz).
+                svc.log("Onay ekranı (bot beklemiyor, dokunulmuyor)")
         }
     }
 
@@ -191,8 +171,8 @@ class BotLoop(private val svc: BotService) {
 
     private suspend fun scout(frame: Frame, now: Long) {
         // Ganimet: sarı altın (y≈178) ve pembe iksir (y≈245); kara iksir okunmaz
-        val gold = Ocr.readNumber(frame.full, 110, 150, 340, 205)
-        val elixir = Ocr.readNumber(frame.full, 110, 222, 340, 275)
+        val gold = Ocr.readNumber(frame.full, 105, 138, 345, 200)
+        val elixir = Ocr.readNumber(frame.full, 105, 220, 345, 275)
         if (gold == null || elixir == null) {
             pending = null
             svc.log("Ganimet okunuyor…")
@@ -224,12 +204,11 @@ class BotLoop(private val svc: BotService) {
             prevVillage = cur
             ileriAt = now
             pending = null
-            svc.log("Toplam $total ≤ 3M → İleri")
+            svc.log("Toplam $total ≤ 1M → İleri")
             tapRef(frame, 2220f, 1148f)
         } else {
-            svc.log("Toplam $total > 3M → saldırı başlıyor")
+            svc.log("Toplam $total > 1M → saldırı başlıyor")
             beginAttack(now)
-            tokenPhase(frame, 0L)
         }
     }
 
@@ -237,30 +216,27 @@ class BotLoop(private val svc: BotService) {
 
     private fun beginAttack(now: Long) {
         stage = Stage.ATTACK
-        phase = Phase.TOKENS
+        phase = Phase.ZOOM
         attackStart = if (now > 0) now else SystemClock.elapsedRealtime()
-        heroDeployAt = 0L
-        lastGroupEndAt = 0L
-        groupCount = 0
-        tokenPlaced = 0
-        heroIndex = 0
-        spellIndex = 0
-        abilityIndex = 0
-        flushIndex = 0
-        flushRound = 0
-        spellSeed = 0
+        firstDeployAt = 0L
+        houndStartAt = 0L
+        houndTaps = 0
+        cardTaps = 0
+        cardKeepAt = 0L
+        sceneCheckAt = 0L
+        kingFlushRound = 0
         battleScanned = false
         scanTries = 0
-        retreatAt = 0L
-        for (i in spellCasts.indices) spellCasts[i] = 0
         releaseMap()
     }
 
     private fun finishAttack() {
         releaseMap()
         stage = Stage.SCOUT
-        phase = Phase.TOKENS
+        phase = Phase.ZOOM
         attackStart = 0L
+        firstDeployAt = 0L
+        houndStartAt = 0L
         battleScanned = false
         scanTries = 0
     }
@@ -301,8 +277,14 @@ class BotLoop(private val svc: BotService) {
 
     private suspend fun battle(frame: Frame, scene: Scene, now: Long) {
         if (stage != Stage.ATTACK) return
-        val battleScene = scene == Scene.ATTACK_BATTLE
 
+        // 1) Zoom: harita taramasından ÖNCE, tek seferlik
+        if (phase == Phase.ZOOM) {
+            zoomPhase(frame)
+            return
+        }
+
+        val battleScene = scene == Scene.ATTACK_BATTLE
         val d = deployer
         if (d == null) {
             if (!prepareMap(frame, battleScene)) return
@@ -312,241 +294,168 @@ class BotLoop(private val svc: BotService) {
             battleScanned = true
         }
 
-        val elapsed = now - attackStart
-        if (elapsed >= BATTLE_HARD_LIMIT_MS) {
-            startRetreat(frame, now)
-            return
-        }
-
-        // 70 sn dolduysa hangi aşamada olursa olsun teslim ol
-        if (elapsed >= BATTLE_LIMIT_MS) {
-            startRetreat(frame, now)
-            return
-        }
-
         when (phase) {
-            Phase.TOKENS -> tokenPhase(frame, elapsed)
-            Phase.HEROES -> heroPhase(frame)
-            Phase.SPELLS -> spellPhase(frame)
-            Phase.ABILITY -> abilityPhase(frame, now)
-            Phase.FLUSH -> flushPhase(frame)
-            Phase.WAIT -> if (elapsed >= BATTLE_LIMIT_MS) {
-                startRetreat(frame, now)
-            } else {
-                svc.log("Teslim olmaya ${(BATTLE_LIMIT_MS - elapsed) / 1000} sn")
-                delay(150)
+            Phase.ZOOM -> zoomPhase(frame)
+            Phase.HOUNDS -> houndPhase(frame)
+            Phase.KING -> kingPhase(frame)
+            Phase.WAIT -> {
+                val ref = if (firstDeployAt > 0) firstDeployAt else attackStart
+                if (now - ref > NATURAL_LIMIT_MS) {
+                    svc.stopWithWarning("⚠ Savaş kendiliğinden bitmedi, durdu")
+                } else {
+                    svc.log("Savaş sürüyor… ${(now - ref) / 1000} sn")
+                    delay(200)
+                }
             }
         }
     }
 
-    /** 1) x40 kartından 10'ar asker, 10 sn arayla 4 grup; hepsi ayrı noktalara. */
-    private suspend fun tokenPhase(frame: Frame, elapsed0: Long) {
-        val d = deployer ?: return
-        var elapsed = elapsed0
-        // her grup, bir önceki grubun BİTİŞİNDEN 10 sn sonra başlar
-        while (groupCount < TOKEN_GROUPS &&
-            (groupCount == 0 || SystemClock.elapsedRealtime() - lastGroupEndAt >= GROUP_DELAY_MS)
-        ) {
-            tapCard(frame, SLOT_TOKENS)
-            delay(150)
-            var placed = 0
-            for (i in 0 until TOKEN_PER_GROUP) {
-                if (!svc.running) return
-                var firstDone = tokenPlaced > 0
-                val ok = place(frame, { again ->
-                    if (!firstDone && !again) { firstDone = true; d.first() }
-                    else d.anyFree()
-                })
-                if (!ok) { delay(TAP_GAP_MS); continue }
-                placed++
-                tokenPlaced++
-                delay(TAP_GAP_MS)
-            }
-            groupCount++
-            lastGroupEndAt = SystemClock.elapsedRealtime()
-            svc.log("Asker grubu $groupCount/$TOKEN_GROUPS: $placed (toplam $tokenPlaced)")
-            elapsed = SystemClock.elapsedRealtime() - attackStart
-        }
-        if (groupCount >= TOKEN_GROUPS) {
-            phase = Phase.HEROES
-            heroIndex = 0
-        }
-    }
-
-    /** 2) Kahramanlar sağ üst bölgeye. */
-    private suspend fun heroPhase(frame: Frame) {
-        val d = deployer ?: return
-        if (heroIndex >= SLOT_HEROES.size) {
-            phase = Phase.SPELLS
-            spellIndex = 0
-            return
-        }
-        val slot = SLOT_HEROES[heroIndex]
-        tapCard(frame, slot)
-        delay(150)
-        place(frame, { d.heroPoint(heroIndex) })
-        heroIndex++
-        heroDeployAt = SystemClock.elapsedRealtime()   // yetenek sayacı SON kahramandan başlar
-        svc.log("Kahraman $heroIndex → sağ üst")
-        if (heroIndex >= SLOT_HEROES.size) {
-            phase = Phase.SPELLS
-            spellIndex = 0
-        }
-    }
-
-    /** 3) Büyüler üssün ortasına (kral bölgesi); kart adedi kadar atış. */
-    private suspend fun spellPhase(frame: Frame) {
-        val d = deployer ?: return
-        if (spellIndex >= SLOT_SPELLS.size) {
-            phase = Phase.ABILITY
-            abilityIndex = 0
-            return
-        }
-        val slot = SLOT_SPELLS[spellIndex]
-        if (spellCasts[spellIndex] == 0) {
-            spellCasts[spellIndex] = (readCount(frame, slot) ?: 3).coerceIn(1, 8)
-            svc.log("Büyü ${spellIndex + 1}: ${spellCasts[spellIndex]} atış")
-        }
-        for (k in 0 until spellCasts[spellIndex]) {
+    /** Ekranı iki parmakla uzaklaştırır (kıstırma); alan sonra yeniden taranır. */
+    private suspend fun zoomPhase(frame: Frame) {
+        val c = PointF()
+        Ref.map(1210f, 700f, frame.w, frame.h, c)
+        val r0 = frame.w * 0.13f
+        val r1 = frame.w * 0.035f
+        svc.log("Ekran uzaklaştırılıyor")
+        for (i in 0 until ZOOM_PINCHES) {
             if (!svc.running) return
-            tapCard(frame, slot)
-            delay(120)
-            tapPoint(frame, d.nextSpellPoint())
-            delay(TAP_GAP_MS)
+            svc.pinch(c.x, c.y, r0, r1, 260L)
+            delay(140)
         }
-        spellIndex++
-        if (spellIndex >= SLOT_SPELLS.size) {
-            phase = Phase.ABILITY
-            abilityIndex = 0
-        }
+        delay(ZOOM_WAIT_MS)
+        releaseMap()          // zoom'lu kareyle alanı yeniden tara
+        houndStartAt = 0L
+        phase = Phase.HOUNDS
+        svc.log("Uzaklaştırıldı → tazılar bırakılıyor (15 sn)")
     }
 
-    /** 4) Kahraman bırakıldıktan 10 sn sonra kartlara tekrar dokun = yetenek. */
-    private suspend fun abilityPhase(frame: Frame, now: Long) {
-        if (heroDeployAt != 0L && now - heroDeployAt < HERO_ABILITY_DELAY_MS) {
-            svc.log("Yetenek için ${(HERO_ABILITY_DELAY_MS - (now - heroDeployAt)) / 1000} sn")
-            delay(150)
-            return
+    /**
+     * 15 sn boyunca durmadan: kartı seç, AYNI ANDA 3 geçerli noktaya 3 tazı bırak, tekrar.
+     * Kart sayacı okunmaz/okunması beklenmez; geçersiz yere denk gelen dokunuşlar telafi edilir.
+     */
+    private suspend fun houndPhase(frame: Frame) {
+        if (houndStartAt == 0L) {
+            houndStartAt = SystemClock.elapsedRealtime()
+            cardKeepAt = 0L
+            cardTaps = 0
+            sceneCheckAt = 0L
         }
-        if (abilityIndex >= SLOT_HEROES.size) {
-            buildFlush(frame)
-            phase = Phase.FLUSH
-            return
-        }
-        tapCard(frame, SLOT_HEROES[abilityIndex])
-        abilityIndex++
-        svc.log("Kahraman yeteneği $abilityIndex")
-        delay(600)
-    }
-
-    /** 5) Elde kalan kartlar: askerler geçerli zemine, büyüler üs merkezine boşaltılır. */
-    private fun buildFlush(frame: Frame) {
-        flushSlots.clear()
-        flushIsSpell.clear()
-        // x40 kartı her zaman denenir: geçersiz yere dokunulduğu için içeride asker kalmış olabilir
-        flushSlots.add(SLOT_TOKENS)
-        flushIsSpell.add(false)
-        flushSlots.add(SLOT_TROOP2)
-        flushIsSpell.add(false)
-        for (s in SLOT_SPELLS) {
-            flushSlots.add(s)
-            flushIsSpell.add(true)
-        }
-        flushIndex = 0
-        flushRound = 0
-        svc.log("Kalan kartlar boşaltılıyor (x40 dahil)")
-    }
-
-    private suspend fun flushPhase(frame: Frame) {
-        val d = deployer ?: return
-        if (flushIndex >= flushSlots.size) {
-            phase = Phase.WAIT
-            return
-        }
-        val slot = flushSlots[flushIndex]
-        val isSpell = flushIsSpell[flushIndex]
-        if (flushRound == 0) {
-            tapCard(frame, slot)
-            delay(150)
-        }
-        var placed = 0
-        for (i in 0 until FLUSH_TAPS) {
+        while (true) {
             if (!svc.running) return
-            if (isSpell) {
-                tapPoint(frame, d.nextSpellPoint())
-            } else {
-                if (!place(frame, { d.anyFree() })) continue
+            val t = SystemClock.elapsedRealtime()
+            if (t - houndStartAt >= HOUND_MS) break
+
+            // Sahne değişti mi? (savaş bittiyse boşa dokunmayalım)
+            if (t - sceneCheckAt >= SCENE_CHECK_MS) {
+                sceneCheckAt = t
+                val st = currentScene()
+                if (st == Scene.RESULT || st == Scene.HOME) {
+                    svc.log("Savaş bitti (${houndTaps} tazı dokunuşu)")
+                    return
+                }
             }
-            placed++
-            delay(TAP_GAP_MS)
+
+            // Kart seçimini tazele. (Seçili karta tekrar basmak seçimi kaldırabilir;
+            // bu yüzden yalnızca ilk dokunuş + tek bir tazeleme yapılır.)
+            if (cardTaps < CARD_REFRESH && (cardKeepAt == 0L || t - cardKeepAt >= CARD_KEEP_MS)) {
+                tapCard(frame, SLOT_HOUNDS)
+                cardTaps++
+                cardKeepAt = t
+                delay(80)
+            }
+
+            val n = deployBurst(frame, HOUNDS_PER_BURST)
+            if (n > 0) {
+                houndTaps += n
+                if (firstDeployAt == 0L) firstDeployAt = SystemClock.elapsedRealtime()
+            }
+            delay(BURST_GAP_MS)
         }
-        flushRound++
-        val maxRounds = if (slot == SLOT_TOKENS) 12 else FLUSH_ROUNDS
-        delay(250)
-        val fresh = svc.grab()
-        val left = if (fresh != null) {
-            try { flushCountLeft(fresh, slot) } finally { fresh.recycle() }
-        } else flushCountLeft(frame, slot)
-        if (left && flushRound < maxRounds) {
-            svc.log("Kart ${slot + 1}: kalan var → tekrar")
-            return
-        }
-        if (placed == 0) svc.log("Kart ${slot + 1}: uygun nokta bulunamadı")
-        flushIndex++
-        flushRound = 0
+        svc.log("Tazı penceresi bitti: $houndTaps asker bırakıldı")
+        phase = Phase.KING
     }
 
-    /** Kartın sol üst köşesindeki "xNN" sayacı hâlâ duruyor mu? (okunamazsa hayır) */
+    /** Kralı sağ üst/ön cepheye bırakır; ardından kartta tazı kaldıysa boşaltır. */
+    private suspend fun kingPhase(frame: Frame) {
+        val d = deployer
+        if (d != null) {
+            tapCard(frame, SLOT_KING)
+            delay(180)
+            val p = d.heroPoint(0)
+            if (p >= 0) tapPoint(frame, p) else tapRef(frame, 1620f, 470f)
+            if (firstDeployAt == 0L) firstDeployAt = SystemClock.elapsedRealtime()
+            svc.log("Kral bırakıldı → savaşın bitmesi bekleniyor")
+        } else {
+            svc.log("Kral: alan hazır değil, sonra denenecek")
+            return
+        }
+
+        // Elde tazı kaldıysa: kart sayacı hâlâ dolu görünüyorsa kısa boşaltma turu
+        var round = 0
+        while (round < KING_FLUSH_ROUNDS && svc.running) {
+            val fresh = svc.grab()
+            val left = if (fresh != null) {
+                try { flushCountLeft(fresh, SLOT_HOUNDS) } finally { fresh.recycle() }
+            } else false
+            if (!left) break
+            round++
+            tapCard(frame, SLOT_HOUNDS)
+            delay(100)
+            repeat(4) {
+                val n = deployBurst(frame, HOUNDS_PER_BURST)
+                if (n > 0) houndTaps += n
+                delay(120)
+            }
+        }
+        if (round > 0) svc.log("Kalan tazılar boşaltıldı (${round} tur)")
+        phase = Phase.WAIT
+    }
+
+    /**
+     * Aynı anda [count] ayrı geçerli noktaya dokunur (tek jestte çok parmak).
+     * Jest kabul edilmezse dokunuşlar kısa aralıkla tek tek gönderilir.
+     */
+    private suspend fun deployBurst(frame: Frame, count: Int): Int {
+        val d = deployer ?: return 0
+        val live = Vision(frame.small)
+        val xs = FloatArray(count)
+        val ys = FloatArray(count)
+        var n = 0
+        val q = PointF()
+        while (n < count) {
+            var p = d.anyFree()
+            var tries = 0
+            while (p >= 0 && !d.valid(p, live) && tries < 3) { p = d.anyFree(); tries++ }
+            if (p < 0) break
+            Ref.map(d.xOf(p).toFloat(), d.yOf(p).toFloat(), frame.w, frame.h, q)
+            xs[n] = q.x; ys[n] = q.y
+            n++
+        }
+        if (n == 0) return 0
+        if (n == count && svc.tapMulti(xs, ys)) return n
+        var done = 0
+        for (i in 0 until n) {
+            if (svc.tap(xs[i], ys[i])) done++
+            delay(45)
+        }
+        return done
+    }
+
+    /** Şu anki sahneyi taze kareden okur (bırakma sırasında kontrol için). */
+    private suspend fun currentScene(): Scene? {
+        val f = svc.grab() ?: return null
+        return try { Scenes.detect(f.small) } finally { f.recycle() }
+    }
+
+    /** Kartın sol üstündeki "xNN" sayacı hâlâ duruyor mu? (okunamazsa hayır) */
     private fun flushCountLeft(frame: Frame, slot: Int): Boolean {
-        val left = readCount(frame, slot)
-        if (left == null) {
-            // okunamadı: x40 / büyü kartında sayaç yoksa kart bitmiş demektir; yine de x40 için 40 dokunuşa kadar zorla
-            return slot == SLOT_TOKENS && tokenPlaced + flushRound * FLUSH_TAPS < 44
-        }
+        val left = readCount(frame, slot) ?: return false
         return left > 0
     }
 
     private fun readCount(frame: Frame, slot: Int): Int? {
         val x = CARD_LBL_X[slot.coerceIn(0, CARD_LBL_X.size - 1)]
         return Ocr.readCount(frame.full, x[0], CARD_LBL_Y0, x[1], CARD_LBL_Y1)
-    }
-
-    // ------------------------------------------------------------- teslim
-
-    private suspend fun startRetreat(frame: Frame, now: Long) {
-        releaseMap()
-        stage = Stage.RETREAT
-        retreatAt = now
-        lastTapScene = Scene.ATTACK_BATTLE
-        lastTapAt = now
-        svc.log("70 sn doldu → Teslim Ol")
-        tapRef(frame, SURRENDER_X.toFloat(), SURRENDER_Y.toFloat())
-    }
-
-    private suspend fun retreat(frame: Frame, scene: Scene, now: Long) {
-        if (retreatAt > 0 && now - retreatAt > 120_000L) {
-            svc.stopWithWarning("⚠ Savaştan çıkılamadı, durdu")
-            return
-        }
-        when (scene) {
-            Scene.SURRENDER_CONFIRM ->
-                act(frame, scene, now, "Tamam (teslim onayı)", RETREAT_ATTEMPTS) {
-                    tapRef(frame, TAMAM_X.toFloat(), TAMAM_Y.toFloat())
-                }
-            Scene.RESULT -> {
-                finishAttack()
-                act(frame, scene, now, "Eve Dön", RETREAT_ATTEMPTS) {
-                    tapRef(frame, EVE_DON_X.toFloat(), EVE_DON_Y.toFloat())
-                }
-            }
-            Scene.HOME -> {
-                finishAttack()
-                svc.log("Köye dönüldü")
-            }
-            else -> act(frame, scene, now, "Teslim Ol", RETREAT_ATTEMPTS) {
-                tapRef(frame, SURRENDER_X.toFloat(), SURRENDER_Y.toFloat())
-            }
-        }
     }
 
     // ------------------------------------------------------------- yardımcı
@@ -577,33 +486,6 @@ class BotLoop(private val svc: BotService) {
         lastTapAt = now
         svc.log(label)
         tap()
-    }
-
-    /**
-     * Noktayı geçerli bir yere bırakır: seçilen nokta canlı karede geçersizse
-     * (bina/kaya/ağaç üstü, çizgi içi) sıradaki adayı dener.
-     * @param picker sonraki adayı üreten fonksiyon
-     */
-    private suspend fun place(
-        frame: Frame,
-        picker: (Boolean) -> Int,
-        maxTries: Int = 4
-    ): Boolean {
-        val live = Vision(frame.small)
-        var last = -1
-        for (i in 0 until maxTries) {
-            val p = picker(i > 0)
-            if (p < 0) break
-            last = p
-            val ok = deployer?.valid(p, live) ?: false
-            if (ok || i == maxTries - 1) {
-                tapPoint(frame, p)
-                return true
-            }
-        }
-        if (last < 0) return false
-        tapPoint(frame, last)
-        return true
     }
 
     private suspend fun tapCard(frame: Frame, slot: Int) {

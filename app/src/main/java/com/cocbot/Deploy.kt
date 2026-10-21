@@ -111,6 +111,12 @@ class Deployer(private val v: Vision) {
                 halfH = ((by1 - by0) / 2f).coerceAtLeast(1f)
             }
         }
+        // Kırmızı çizgi yoksa da (keşif karesi) üs kutusu merkez + yarıçaptan kurulur;
+        // böylece kral/büyü noktaları (0,0) köşesine kaymaz.
+        if (!hasLine) {
+            bx0 = (centerX - halfW).toInt(); by0 = (centerY - halfH).toInt()
+            bx1 = (centerX + halfW).toInt(); by1 = (centerY + halfH).toInt()
+        }
         var y = Y_MIN
         while (y <= Y_MAX) {
             var x = X_MIN

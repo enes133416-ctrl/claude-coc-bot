@@ -1,7 +1,7 @@
 # CoC Bot (Android, derleme GitHub Actions'ta)
 
 Erişilebilirlik servisi ile Clash of Clans ekranını okuyup dokunuş gönderen bir bot.
-Sürüm **2.0** — saldırı planı, teslim olma ve eve dönme adımları otomatiktir.
+Sürüm **3.0** — 50 tazı + kral saldırısı, uzaklaştırma, doğal savaş sonu ve eve dönme otomatiktir.
 
 ## 1) Depoya yükleme ve APK indirme
 
@@ -31,31 +31,41 @@ Bu deponun kökünde hazır bir Gradle projesi var (`app/`, `build.gradle.kts`, 
 **Tur:** Köy → Savaş → Eşleşme Bul → Ordu → Saldır! → rakip önizlemesi → savaş → sonuç → köy
 
 ### Keşif
-Ganimet (altın + iksir) okunur. Toplam **3M**'nin altındaysa **İleri** ile yeni köy aranır.
-Üstündeyse saldırı planı çalışır.
+Ganimet (altın + iksir) okunur. Toplam **1.000.000**'u geçmiyorsa **İleri** ile yeni köy aranır.
+Geçiyorsa saldırı planı çalışır.
 
-### Saldırı planı
-1. **Askerler:** sol alttaki **x40** kartına basılır ve **10'ar asker** bırakılır.
-   Sonra **10 sn** beklenir, yine 10 asker… toplam **4 grup = 40 asker**.
-   Her asker, kullanılan noktaların **en uzağına** bırakılır (min. 150 px, kırmızı çizginin dışında,
-   bina/ağaç/su üstüne asla). Yani askerler birbirine yakın düşmez.
-2. **Kahramanlar:** 3 kahraman kartı sırayla basılıp **sağ üst** bölgeye bırakılır.
-3. **Büyüler:** herolardan sonra büyü kartları basılır ve **üssün ortasına (kral bölgesi)** atılır;
-   atış sayısı karttaki `xN` etiketinden okunur.
-4. **Yetenekler:** son kahraman bırakıldıktan **10 sn** sonra kahraman kartlarına tekrar basılır
-   (oyunda kart tekrar basılınca özellik/güç açılır).
-5. **Kalan kartlar:** x40 dahil bütün kartlar tekrar basılır; elde kalan askerler geçerli alanlara,
-   büyüler üs merkezine boşaltılır. Kart sayacı hâlâ dolu görünüyorsa ikinci tur yapılır —
-   yani geçersiz yere dokunulmuş olsa bile **hiç asker/büyü kartta kalmaz**.
+### Saldırı planı (v3)
+1. **Uzaklaştır:** Ekran iki parmakla kıstırılıp **uzaklaştırılır** (iki kez). Harita bundan
+   **sonra** taranır; böylece görüş alanı genişler ve bırakma noktaları bu görünüme göre seçilir.
+2. **Tazılar (x50):** Karta bir kez basılır; ardından **15 saniye boyunca durmadan**, her seferinde
+   **aynı anda 3 ayrı geçerli noktaya 3 tazı** bırakılır (tek jestte üç parmak; cihaz çoklu
+   dokunuşu kabul etmezse dokunuşlar ~45 ms arayla tek tek gider).
+   - Noktalar kırmızı çizginin dışında, yasak arayüz bölgelerinden uzak, bina/ağaç/su üstünde değil.
+   - Geçersiz yere denk gelen dokunuş önemli değildir: 15 sn boyunca basılmaya devam edilir,
+     böylece **kartta tazı kalmaz**.
+   - Kart sayacı okunmaz/okunması beklenmez.
+3. **Kral:** 15 sn dolunca kral kartına basılır ve **sağ üst / ön cepheye** bırakılır.
+4. **Kalan tazı:** Kartta hâlâ tazı görünüyorsa kısa bir boşaltma turu yapılır (en fazla 6 tur).
+5. **Teslim olunmaz.** Savaş kendiliğinden bitene kadar beklenir (CoC saldırı süresi 3 dk).
+   Sonuç ekranında **Eve Dön**'e basılır → köye dönülür ve tur baştan başlar.
+   Savaş 3,5 dakikada hâlâ bitmediyse bot **durmaz, teslim de olmaz**: uyarı verip durur.
 
-### Savaştan çıkış
-Savaş başlangıcından **70 sn** sonra (plan erken bitse de bekleme fazında sayılır):
-1. Sol alttaki kırmızı **Teslim Ol** butonuna basılır,
-2. çıkan "Teslim olalım mı?" ekranında yeşil **Tamam**'a basılır,
-3. savaş bitiş ekranında **Eve Dön**'e basılır → köye dönülür ve tur baştan başlar.
+Bir sahne tanınamazsa **hiçbir yere dokunulmaz** (güvenlik).
 
-Bir sahne tanınamazsa **hiçbir yere dokunulmaz** (güvenlik). Plan 95 sn'yi aşarsa yine teslim olunur.
+## 5) Zaman çizelgesi
 
-## 5) Not
+| An | Olay |
+|---|---|
+| 0 sn | Ganimet > 1M → plan başlar |
+| 0–1 sn | Ekran uzaklaştırılır (2 kıstırma) |
+| ~1 sn | Tazı kartı seçilir; 15 sn'lik bırakma penceresi başlar |
+| 1–16 sn | 3'er 3'er, aynı anda üç noktaya tazı bırakma |
+| ~16 sn | Kral sağ üste bırakılır |
+| 16–18 sn | (gerekirse) kalan tazıların boşaltılması |
+| ~3 dk | Savaş doğal olarak biter → **Eve Dön** → köy |
+| 3,5 dk | Emniyet sınırı: teslim olmadan durur |
+
+## 6) Not
 
 Android, `takeScreenshot` çağrılarına ~0,3 sn aralık koyar; bot bu sınırın izin verdiği hızda döner.
+Bırakma sırasında ise her kare beklemeden, art arda üçlü dokunuşlar gönderilir.

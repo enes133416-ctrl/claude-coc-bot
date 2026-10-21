@@ -130,12 +130,52 @@ open class BotService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, TAP_MS))
             .build()
-        return suspendCancellableCoroutine { cont ->
-            val ok = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription?) { if (cont.isActive) cont.resume(true) }
-                override fun onCancelled(g: GestureDescription?) { if (cont.isActive) cont.resume(false) }
-            }, null)
+        return dispatchAwait(gesture)
+    }
+
+    /**
+     * Aynı anda birden çok noktaya dokunma (çok parmak, tek jest).
+     * Tazılar 3'er 3'er bırakılırken kullanılır. Jest kabul edilmezse false döner;
+     * çağıran taraf tek tek dokunuşa düşer.
+     */
+    open suspend fun tapMulti(xs: FloatArray, ys: FloatArray): Boolean {
+        if (!running) return false
+        if (xs.isEmpty()) return false
+        if (xs.size == 1) return tap(xs[0], ys[0])
+        val b = GestureDescription.Builder()
+        for (i in xs.indices) {
+            val path = Path().apply { moveTo(xs[i], ys[i]) }
+            b.addStroke(GestureDescription.StrokeDescription(path, 0, TAP_MS))
+        }
+        return dispatchAwait(b.build())
+    }
+
+    /**
+     * İki parmakla kıstırma. [r0] > [r1] ise parmaklar birbirine yaklaşır → ekran UZAKLAŞIR.
+     * [r0] < [r1] ise ekran yakınlaşır.
+     */
+    open suspend fun pinch(cx: Float, cy: Float, r0: Float, r1: Float, ms: Long = 260L): Boolean {
+        if (!running) return false
+        val left = Path().apply { moveTo(cx - r0, cy); lineTo(cx - r1, cy) }
+        val right = Path().apply { moveTo(cx + r0, cy); lineTo(cx + r1, cy) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(left, 0, ms))
+            .addStroke(GestureDescription.StrokeDescription(right, 0, ms))
+            .build()
+        return dispatchAwait(gesture)
+    }
+
+    /** Hareketi gönderir ve bitmesini bekler (tamamlandı → true, iptal → false). */
+    private suspend fun dispatchAwait(gesture: GestureDescription): Boolean =
+        suspendCancellableCoroutine { cont ->
+            val ok = try {
+                dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(g: GestureDescription?) { if (cont.isActive) cont.resume(true) }
+                    override fun onCancelled(g: GestureDescription?) { if (cont.isActive) cont.resume(false) }
+                }, null)
+            } catch (e: Throwable) {
+                false
+            }
             if (!ok && cont.isActive) cont.resume(false)
         }
-    }
 }
